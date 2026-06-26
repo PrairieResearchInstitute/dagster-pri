@@ -4,6 +4,17 @@ requires-python = ">=3.10,<3.15"
 version = "0.1.0"
 dependencies = [
     "dagster==1.13.11",
+    "cdsapi>=0.7.4",
+    "xarray>=2024.6",
+    "rioxarray>=0.15",
+    "geopandas>=0.14",
+    "pyogrio",
+    "zarr>=3",
+    "s3fs>=2024.6",
+    "numcodecs",
+    "netcdf4",
+    "dask",
+    "python-dotenv",
 ]
 
 [dependency-groups]
