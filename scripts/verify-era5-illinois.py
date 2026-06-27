@@ -2,9 +2,25 @@
 """
 verify-era5-illinois.py
 
-Open the ARCO ERA5-Land Zarr store written by era5-illinois.py and verify what
-landed in the object store. Prints a structural summary (dims, variables, time
-coverage, chunking, clip footprint) and writes a couple of diagnostic plots.
+Open the **Icechunk** ERA5-Land/Illinois repository written by era5-illinois.py
+and verify what landed in the object store. Prints a structural summary (dims,
+variables, time coverage, chunking, clip footprint) and writes a couple of
+diagnostic plots.
+
+Why this differs from a plain-Zarr verifier
+--------------------------------------------
+era5-illinois.py now writes a Zarr **v3** store managed by Icechunk. It is NOT
+plain-Zarr readable -- you cannot `xr.open_zarr("s3://...")` it. You open the
+repo through the `icechunk` package and read its `main` branch:
+
+    repo = icechunk.Repository.open(make_icechunk_storage(prefix))
+    ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+
+The writer also **pre-allocates a full hourly axis** (1950 -> a configurable
+end) and region-writes real months into their slots; every un-ingested hour is
+all-NaN. So `time=0` (1950-01-01) is almost always empty. This script therefore
+detects the *populated* time range and uses it for the clip footprint and the
+plots, while still reporting the full pre-allocated axis.
 
 Run
 ---
@@ -13,7 +29,7 @@ Run
 
   # options
   uv run --with matplotlib scripts/verify-era5-illinois.py \
-      --var 2m_temperature --out-dir scratch/era5_check
+      --var t2m --out-dir scratch/era5_check
 
 S3/Ceph connection is read from .env exactly like the writer script.
 """
@@ -28,40 +44,91 @@ from pathlib import Path
 DEFAULT_ZARR_PREFIX = "era5/STATE=IL"
 
 
-def build_storage_options() -> dict:
-    """S3/Ceph storage options sourced from .env (loaded via python-dotenv).
+# --------------------------------------------------------------------------- #
+# Icechunk storage / repo (mirrors era5-illinois.py so the two stay in sync)
+# --------------------------------------------------------------------------- #
+def make_icechunk_storage(prefix: str) -> "icechunk.Storage":
+    """Icechunk S3 storage pointed at the OSN/Ceph endpoint from .env.
 
-    Accept either AWS_ENDPOINT_URL (what's in this project's .env) or
-    S3_ENDPOINT_URL (what the writer script documents).
+    Ceph compatibility is handled here: force_path_style mirrors s3fs's
+    addressing_style="path", and endpoint_url points at OSN instead of AWS.
+    Icechunk's Rust S3 client ignores the botocore AWS_*_CHECKSUM_* env vars, so
+    none are set on this path. Accept either S3_ENDPOINT_URL (what the writer
+    documents) or AWS_ENDPOINT_URL (what this project's .env actually uses).
     """
-    endpoint = os.environ.get("AWS_ENDPOINT_URL") or os.environ.get("S3_ENDPOINT_URL")
-    return {
-        "key": os.environ["AWS_ACCESS_KEY_ID"],
-        "secret": os.environ["AWS_SECRET_ACCESS_KEY"],
-        "client_kwargs": {"endpoint_url": endpoint},
-        # Ceph RGW: address buckets as a URL path segment, not a DNS subdomain.
-        "config_kwargs": {"s3": {"addressing_style": "path"}},
-    }
+    import icechunk
 
-
-def open_store(zarr_uri: str, storage_options: dict):
-    import xarray as xr
-
-    return xr.open_zarr(
-        zarr_uri,
-        storage_options=storage_options,
-        consolidated=True,
-        decode_timedelta=True,
+    endpoint = os.environ.get("S3_ENDPOINT_URL") or os.environ["AWS_ENDPOINT_URL"]
+    return icechunk.s3_storage(
+        bucket=os.environ["BUCKET_NAME"],
+        prefix=prefix,
+        endpoint_url=endpoint,
+        region=os.environ.get("S3_REGION", "us-east-1"),
+        access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+        secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        force_path_style=True,                       # Ceph RGW path addressing
+        allow_http=endpoint.lower().startswith("http://"),
     )
 
 
-def summarize(ds) -> None:
+def open_store(prefix: str, branch: str = "main"):
+    """Open the Icechunk repo's branch read-only as an xarray Dataset."""
+    import icechunk
+    import xarray as xr
+
+    storage = make_icechunk_storage(prefix)
+    repo = icechunk.Repository.open(storage)
+    session = repo.readonly_session(branch)
+    ds = xr.open_zarr(session.store, consolidated=False, decode_timedelta=True)
+    return repo, ds
+
+
+# --------------------------------------------------------------------------- #
+# Populated time range (the pre-allocated axis is mostly all-NaN)
+# --------------------------------------------------------------------------- #
+def populated_time_range(ds, var: str):
+    """Return (i0, i1, times) bounding the timesteps that actually hold data.
+
+    The store's `time` axis is pre-allocated from 1950 and only the ingested
+    months carry finite values. We find which timesteps have ANY finite cell via
+    a lazy dask reduction -- un-ingested regions resolve to the NaN fill value
+    without an S3 fetch, so this stays cheap relative to the populated fraction.
+
+    Returns (None, None, mask) with an all-False mask if nothing is populated.
+    """
+    import numpy as np
+
+    if var not in ds.data_vars:
+        return None, None, None
+
+    # Reduce over space to a 1-D per-timestep "has any data" mask, then realize.
+    mask = ds[var].notnull().any(dim=("latitude", "longitude")).compute().values
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        return None, None, mask
+    return int(idx[0]), int(idx[-1]), mask
+
+
+def summarize(ds, repo, branch: str) -> None:
     import numpy as np
 
     print("\n" + "=" * 70)
     print("DATASET SUMMARY")
     print("=" * 70)
     print(ds)
+
+    # Icechunk-specific: how many commits are on this branch.
+    try:
+        ancestry = list(repo.ancestry(branch=branch))
+        print("\n" + "-" * 70)
+        print("ICECHUNK HISTORY")
+        print("-" * 70)
+        print(f"  branch        : {branch}")
+        print(f"  commits       : {len(ancestry)}")
+        print(f"  latest commit : {ancestry[0].message!r}")
+        print(f"  snapshot id   : {ancestry[0].id}")
+    except Exception as e:  # noqa: BLE001 -- ancestry API drift shouldn't kill the summary
+        print(f"\n  (could not read Icechunk ancestry: {e})")
 
     print("\n" + "-" * 70)
     print("DIMENSIONS")
@@ -72,7 +139,7 @@ def summarize(ds) -> None:
     if "time" in ds.coords:
         t = ds["time"].values
         print("\n" + "-" * 70)
-        print("TIME COVERAGE")
+        print("PRE-ALLOCATED TIME AXIS")
         print("-" * 70)
         print(f"  start : {t[0]}")
         print(f"  end   : {t[-1]}")
@@ -112,37 +179,71 @@ def summarize(ds) -> None:
         print(f"      units  : {units}    {long_name}")
 
 
-def nan_footprint(ds, var: str) -> None:
-    """Report the clip footprint: how much of the bbox is NaN (outside IL)."""
+def report_populated(ds, var: str, i0, i1, mask) -> None:
+    """Report which slice of the pre-allocated axis actually holds data."""
+    if var not in ds.data_vars:
+        print(f"\nSkipping populated-range report: '{var}' not in store. "
+              f"Available: {list(ds.data_vars)}")
+        return
+    print("\n" + "-" * 70)
+    print(f"POPULATED TIME RANGE (var={var})")
+    print("-" * 70)
+    if i0 is None:
+        print("  WARNING: no populated timesteps -- store appears empty for this var.")
+        return
+    t = ds["time"].values
+    n_pop = int(mask.sum())
+    print(f"  first populated : {t[i0]}  (index {i0})")
+    print(f"  last  populated : {t[i1]}  (index {i1})")
+    print(f"  populated steps : {n_pop} / {len(t)}  "
+          f"({100 * n_pop / len(t):.2f}% of the pre-allocated axis)")
+    # Within the populated span, flag any all-NaN gaps (un-ingested months).
+    span = i1 - i0 + 1
+    holes = span - n_pop
+    if holes:
+        print(f"  gaps inside span: {holes} timesteps "
+              f"(un-ingested months between {t[i0]} and {t[i1]})")
+
+
+def nan_footprint(ds, var: str, i0) -> None:
+    """Report the clip footprint: how much of the bbox is NaN (outside IL).
+
+    Uses the FIRST POPULATED timestep -- on the pre-allocated axis, time=0 is
+    1950 and almost always empty, which would falsely look like a broken clip.
+    """
     import numpy as np
 
-    if var not in ds.data_vars:
+    if var not in ds.data_vars or i0 is None:
         return
-    da = ds[var].isel(time=0)
+    da = ds[var].isel(time=i0)
     total = da.size
     valid = int(np.isfinite(da.values).sum())
     print("\n" + "-" * 70)
-    print(f"CLIP FOOTPRINT (var={var}, first timestep)")
+    print(f"CLIP FOOTPRINT (var={var}, first populated timestep {ds.time.values[i0]})")
     print("-" * 70)
     print(f"  valid cells : {valid} / {total}  ({100 * valid / total:.1f}% inside clip)")
     if valid == 0:
-        print("  WARNING: no valid cells — clip may have removed everything.")
+        print("  WARNING: no valid cells -- clip may have removed everything.")
 
 
-def make_plots(ds, var: str, out_dir: Path) -> None:
+def make_plots(ds, var: str, i0, i1, out_dir: Path) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import numpy as np
 
     if var not in ds.data_vars:
         print(f"\nSkipping plots: '{var}' not in store. "
               f"Available: {list(ds.data_vars)}")
         return
+    if i0 is None:
+        print(f"\nSkipping plots: '{var}' has no populated timesteps.")
+        return
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    da = ds[var]
+    # Restrict to the populated span so we never average over the empty 1950..
+    # pre-allocated tail (skipna handles any interior gaps).
+    da = ds[var].isel(time=slice(i0, i1 + 1))
     units = da.attrs.get("units", "")
     long_name = da.attrs.get("long_name", var)
 
@@ -151,10 +252,10 @@ def make_plots(ds, var: str, out_dir: Path) -> None:
     # ------------------------------------------------------------------ #
     field = da.mean("time", keep_attrs=True)
     fig, ax = plt.subplots(figsize=(6, 8))
-    im = field.plot(ax=ax, cmap="viridis", add_colorbar=True,
-                    cbar_kwargs={"label": f"{var} [{units}]"})
-    ax.set_title(f"Time-mean {long_name}\n{str(ds.time.values[0])[:13]} .. "
-                 f"{str(ds.time.values[-1])[:13]}")
+    field.plot(ax=ax, cmap="viridis", add_colorbar=True,
+               cbar_kwargs={"label": f"{var} [{units}]"})
+    ax.set_title(f"Time-mean {long_name}\n{str(da.time.values[0])[:13]} .. "
+                 f"{str(da.time.values[-1])[:13]}")
     ax.set_aspect("equal")
     fig.tight_layout()
     map_path = out_dir / f"{var}_timemean_map.png"
@@ -167,7 +268,7 @@ def make_plots(ds, var: str, out_dir: Path) -> None:
     # ------------------------------------------------------------------ #
     series = da.mean(("latitude", "longitude"), keep_attrs=True)
     fig, ax = plt.subplots(figsize=(11, 4))
-    ax.plot(ds.time.values, series.values, lw=0.8)
+    ax.plot(da.time.values, series.values, lw=0.8)
     ax.set_xlabel("time")
     ax.set_ylabel(f"{var} [{units}]")
     ax.set_title(f"Illinois domain-mean {long_name}")
@@ -187,7 +288,9 @@ def main(argv=None) -> int:
                    help="Variable to plot / inspect (CF short name, e.g. t2m, "
                         "tp, sp, d2m, u10, v10).")
     p.add_argument("--prefix", default=DEFAULT_ZARR_PREFIX,
-                   help="Zarr prefix inside the bucket.")
+                   help="Icechunk repo prefix inside the bucket.")
+    p.add_argument("--branch", default="main",
+                   help="Icechunk branch to read (default: main).")
     p.add_argument("--out-dir", default=None,
                    help="Where to write diagnostic plots (default: ./era5_verify).")
     p.add_argument("--no-plots", action="store_true",
@@ -197,25 +300,28 @@ def main(argv=None) -> int:
     from dotenv import load_dotenv
     load_dotenv()
 
-    # Match the writer: OSN/Ceph rejects the checksums newer botocore adds.
-    os.environ["AWS_REQUEST_CHECKSUM_CALCULATION"] = "when_required"
-    os.environ["AWS_RESPONSE_CHECKSUM_VALIDATION"] = "when_required"
+    try:
+        import icechunk  # noqa: F401
+    except ImportError as e:
+        p.error(f"Missing dependency: {e}. Run `uv sync`.")
 
-    zarr_uri = f"s3://{os.environ['BUCKET_NAME']}/{args.prefix}"
-    print(f"Opening {zarr_uri}")
+    print(f"Opening Icechunk repo s3://{os.environ['BUCKET_NAME']}/{args.prefix} "
+          f"(branch={args.branch})")
+    repo, ds = open_store(args.prefix, args.branch)
 
-    storage_options = build_storage_options()
-    ds = open_store(zarr_uri, storage_options)
+    summarize(ds, repo, args.branch)
 
-    summarize(ds)
-    nan_footprint(ds, args.var)
+    print("\nScanning the pre-allocated axis for populated timesteps...")
+    i0, i1, mask = populated_time_range(ds, args.var)
+    report_populated(ds, args.var, i0, i1, mask)
+    nan_footprint(ds, args.var, i0)
 
     if not args.no_plots:
         out_dir = Path(args.out_dir) if args.out_dir else Path("era5_verify")
         print("\n" + "-" * 70)
         print("DIAGNOSTIC PLOTS")
         print("-" * 70)
-        make_plots(ds, args.var, out_dir)
+        make_plots(ds, args.var, i0, i1, out_dir)
 
     ds.close()
     print("\nDone.")
