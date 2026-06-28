@@ -17,6 +17,7 @@ dependencies = [
     "dask",
     "pandas",
     "python-dotenv",
+    "bottleneck",  # xarray ffill over the ERA5T expver-overlap dimension
 ]
 
 [dependency-groups]
@@ -59,4 +60,4 @@ select = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]

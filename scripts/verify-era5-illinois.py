@@ -24,12 +24,17 @@ plots, while still reporting the full pre-allocated axis.
 
 Run
 ---
-  # matplotlib isn't a project dependency, so pull it in just for this run:
-  uv run --with matplotlib scripts/verify-era5-illinois.py
+  # Full verification (matplotlib isn't a project dependency, so pull it in just
+  # for this run):
+  uv run --with matplotlib scripts/verify-era5-illinois.py verify
 
   # options
-  uv run --with matplotlib scripts/verify-era5-illinois.py \
+  uv run --with matplotlib scripts/verify-era5-illinois.py verify \
       --var t2m --out-dir scratch/era5_check
+
+  # Just the real-data date range (start/end of populated timesteps). Assumes all
+  # variables share the same populated range, so it inspects a single --var:
+  uv run scripts/verify-era5-illinois.py dates --var t2m
 
 S3/Ceph connection is read from .env exactly like the writer script.
 """
@@ -40,6 +45,10 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import icechunk
 
 DEFAULT_ZARR_PREFIX = "era5/STATE=IL"
 
@@ -47,7 +56,7 @@ DEFAULT_ZARR_PREFIX = "era5/STATE=IL"
 # --------------------------------------------------------------------------- #
 # Icechunk storage / repo (mirrors era5-illinois.py so the two stay in sync)
 # --------------------------------------------------------------------------- #
-def make_icechunk_storage(prefix: str) -> "icechunk.Storage":
+def make_icechunk_storage(prefix: str) -> icechunk.Storage:
     """Icechunk S3 storage pointed at the OSN/Ceph endpoint from .env.
 
     Ceph compatibility is handled here: force_path_style mirrors s3fs's
@@ -66,7 +75,7 @@ def make_icechunk_storage(prefix: str) -> "icechunk.Storage":
         region=os.environ.get("S3_REGION", "us-east-1"),
         access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
         secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-        force_path_style=True,                       # Ceph RGW path addressing
+        force_path_style=True,  # Ceph RGW path addressing
         allow_http=endpoint.lower().startswith("http://"),
     )
 
@@ -147,7 +156,7 @@ def summarize(ds, repo, branch: str) -> None:
         if len(t) > 1:
             deltas = np.diff(t).astype("timedelta64[h]").astype(int)
             uniq, counts = np.unique(deltas, return_counts=True)
-            spacing = ", ".join(f"{u}h x{c}" for u, c in zip(uniq, counts))
+            spacing = ", ".join(f"{u}h x{c}" for u, c in zip(uniq, counts, strict=True))
             print(f"  step spacing (hours): {spacing}")
             # Flag any gaps (anything other than the dominant 1h cadence).
             gaps = int((deltas != 1).sum())
@@ -167,14 +176,14 @@ def summarize(ds, repo, branch: str) -> None:
     for name, var in ds.data_vars.items():
         chunks = var.chunks
         chunk_str = (
-            ", ".join(f"{d}:{c[0]}" for d, c in zip(var.dims, chunks))
+            ", ".join(f"{d}:{c[0]}" for d, c in zip(var.dims, chunks, strict=True))
             if chunks
             else "unchunked"
         )
         units = var.attrs.get("units", "?")
         long_name = var.attrs.get("long_name", "")
         print(f"  {name}")
-        print(f"      dims   : {dict(zip(var.dims, var.shape))}")
+        print(f"      dims   : {dict(zip(var.dims, var.shape, strict=True))}")
         print(f"      chunks : {chunk_str}")
         print(f"      units  : {units}    {long_name}")
 
@@ -182,8 +191,10 @@ def summarize(ds, repo, branch: str) -> None:
 def report_populated(ds, var: str, i0, i1, mask) -> None:
     """Report which slice of the pre-allocated axis actually holds data."""
     if var not in ds.data_vars:
-        print(f"\nSkipping populated-range report: '{var}' not in store. "
-              f"Available: {list(ds.data_vars)}")
+        print(
+            f"\nSkipping populated-range report: '{var}' not in store. "
+            f"Available: {list(ds.data_vars)}"
+        )
         return
     print("\n" + "-" * 70)
     print(f"POPULATED TIME RANGE (var={var})")
@@ -195,14 +206,31 @@ def report_populated(ds, var: str, i0, i1, mask) -> None:
     n_pop = int(mask.sum())
     print(f"  first populated : {t[i0]}  (index {i0})")
     print(f"  last  populated : {t[i1]}  (index {i1})")
-    print(f"  populated steps : {n_pop} / {len(t)}  "
-          f"({100 * n_pop / len(t):.2f}% of the pre-allocated axis)")
+    print(
+        f"  populated steps : {n_pop} / {len(t)}  "
+        f"({100 * n_pop / len(t):.2f}% of the pre-allocated axis)"
+    )
     # Within the populated span, flag any all-NaN gaps (un-ingested months).
     span = i1 - i0 + 1
     holes = span - n_pop
     if holes:
-        print(f"  gaps inside span: {holes} timesteps "
-              f"(un-ingested months between {t[i0]} and {t[i1]})")
+        print(
+            f"  gaps inside span: {holes} timesteps "
+            f"(un-ingested months between {t[i0]} and {t[i1]})"
+        )
+
+
+def report_dates(ds, var: str, i0, i1) -> None:
+    """Print only the start/end timestamps of real (populated) data."""
+    if var not in ds.data_vars:
+        print(f"No such variable '{var}' in store. Available: {list(ds.data_vars)}")
+        return
+    if i0 is None:
+        print(f"WARNING: no populated timesteps for '{var}' -- store appears empty.")
+        return
+    t = ds["time"].values
+    print(f"start : {t[i0]}")
+    print(f"end   : {t[i1]}")
 
 
 def nan_footprint(ds, var: str, i0) -> None:
@@ -233,8 +261,7 @@ def make_plots(ds, var: str, i0, i1, out_dir: Path) -> None:
     import matplotlib.pyplot as plt
 
     if var not in ds.data_vars:
-        print(f"\nSkipping plots: '{var}' not in store. "
-              f"Available: {list(ds.data_vars)}")
+        print(f"\nSkipping plots: '{var}' not in store. Available: {list(ds.data_vars)}")
         return
     if i0 is None:
         print(f"\nSkipping plots: '{var}' has no populated timesteps.")
@@ -252,10 +279,10 @@ def make_plots(ds, var: str, i0, i1, out_dir: Path) -> None:
     # ------------------------------------------------------------------ #
     field = da.mean("time", keep_attrs=True)
     fig, ax = plt.subplots(figsize=(6, 8))
-    field.plot(ax=ax, cmap="viridis", add_colorbar=True,
-               cbar_kwargs={"label": f"{var} [{units}]"})
-    ax.set_title(f"Time-mean {long_name}\n{str(da.time.values[0])[:13]} .. "
-                 f"{str(da.time.values[-1])[:13]}")
+    field.plot(ax=ax, cmap="viridis", add_colorbar=True, cbar_kwargs={"label": f"{var} [{units}]"})
+    ax.set_title(
+        f"Time-mean {long_name}\n{str(da.time.values[0])[:13]} .. {str(da.time.values[-1])[:13]}"
+    )
     ax.set_aspect("equal")
     fig.tight_layout()
     map_path = out_dir / f"{var}_timemean_map.png"
@@ -281,23 +308,10 @@ def make_plots(ds, var: str, i0, i1, out_dir: Path) -> None:
     print(f"  wrote {ts_path}")
 
 
-def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--var", default="t2m",
-                   help="Variable to plot / inspect (CF short name, e.g. t2m, "
-                        "tp, sp, d2m, u10, v10).")
-    p.add_argument("--prefix", default=DEFAULT_ZARR_PREFIX,
-                   help="Icechunk repo prefix inside the bucket.")
-    p.add_argument("--branch", default="main",
-                   help="Icechunk branch to read (default: main).")
-    p.add_argument("--out-dir", default=None,
-                   help="Where to write diagnostic plots (default: ./era5_verify).")
-    p.add_argument("--no-plots", action="store_true",
-                   help="Print the summary only; skip plotting.")
-    args = p.parse_args(argv)
-
+def _load_env_and_check(p) -> None:
+    """Load .env and verify the icechunk dependency is importable."""
     from dotenv import load_dotenv
+
     load_dotenv()
 
     try:
@@ -305,8 +319,15 @@ def main(argv=None) -> int:
     except ImportError as e:
         p.error(f"Missing dependency: {e}. Run `uv sync`.")
 
-    print(f"Opening Icechunk repo s3://{os.environ['BUCKET_NAME']}/{args.prefix} "
-          f"(branch={args.branch})")
+
+def cmd_verify(args, p) -> int:
+    """Full verification: summary, populated range, clip footprint, and plots."""
+    _load_env_and_check(p)
+
+    print(
+        f"Opening Icechunk repo s3://{os.environ['BUCKET_NAME']}/{args.prefix} "
+        f"(branch={args.branch})"
+    )
     repo, ds = open_store(args.prefix, args.branch)
 
     summarize(ds, repo, args.branch)
@@ -326,6 +347,71 @@ def main(argv=None) -> int:
     ds.close()
     print("\nDone.")
     return 0
+
+
+def cmd_dates(args, p) -> int:
+    """Print only the start/end timestamps of real (populated) data."""
+    _load_env_and_check(p)
+
+    print(
+        f"Opening Icechunk repo s3://{os.environ['BUCKET_NAME']}/{args.prefix} "
+        f"(branch={args.branch})"
+    )
+    repo, ds = open_store(args.prefix, args.branch)
+
+    print("\nScanning the pre-allocated axis for populated timesteps...")
+    i0, i1, _mask = populated_time_range(ds, args.var)
+    print("\n" + "-" * 70)
+    print(f"REAL-DATA DATE RANGE (var={args.var})")
+    print("-" * 70)
+    report_dates(ds, args.var, i0, i1)
+
+    ds.close()
+    return 0
+
+
+def _add_common_args(sp) -> None:
+    """Args shared by every subcommand."""
+    sp.add_argument(
+        "--var",
+        default="t2m",
+        help="Variable to inspect (CF short name, e.g. t2m, tp, sp, d2m, u10, v10).",
+    )
+    sp.add_argument(
+        "--prefix", default=DEFAULT_ZARR_PREFIX, help="Icechunk repo prefix inside the bucket."
+    )
+    sp.add_argument("--branch", default="main", help="Icechunk branch to read (default: main).")
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="Full verification: summary, populated range, clip footprint, and diagnostic plots.",
+    )
+    _add_common_args(p_verify)
+    p_verify.add_argument(
+        "--out-dir", default=None, help="Where to write diagnostic plots (default: ./era5_verify)."
+    )
+    p_verify.add_argument(
+        "--no-plots", action="store_true", help="Print the summary only; skip plotting."
+    )
+    p_verify.set_defaults(func=cmd_verify)
+
+    p_dates = sub.add_parser(
+        "dates",
+        help="Print only the start/end dates of real (populated) data. "
+        "Assumes all variables share the same range.",
+    )
+    _add_common_args(p_dates)
+    p_dates.set_defaults(func=cmd_dates)
+
+    args = p.parse_args(argv)
+    return args.func(args, p)
 
 
 if __name__ == "__main__":
