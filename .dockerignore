@@ -27,3 +27,6 @@ plans/
 # Docker
 Dockerfile
 .dockerignore
+
+# Local copies of datafiles
+data/

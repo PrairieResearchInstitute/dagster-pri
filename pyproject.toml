@@ -17,8 +17,10 @@ dependencies = [
     "netcdf4",
     "dask",
     "pandas",
+    "pyarrow",  # parquet engine for pandas.to_parquet (daily_station_readings)
     "python-dotenv",
     "bottleneck",  # xarray ffill over the ERA5T expver-overlap dimension
+    "pandas-stubs~=3.0.3",
 ]
 
 [dependency-groups]

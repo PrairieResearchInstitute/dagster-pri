@@ -43,6 +43,34 @@ class IcechunkStorageResource(dg.ConfigurableResource):
             allow_http=self.endpoint_url.lower().startswith("http://"),
         )
 
+    def filesystem(self):
+        """An ``s3fs`` filesystem on the same bucket/endpoint as the Icechunk store.
+
+        For plain object reads/writes (e.g. the stations CSV, parquet outputs) that
+        don't go through Icechunk. ``addressing_style="path"`` mirrors the
+        ``force_path_style=True`` used for Icechunk so Ceph RGW is addressed the same
+        way; ``use_ssl`` follows the endpoint scheme.
+
+        ``request_checksum_calculation="when_required"`` disables botocore's default
+        (>=1.36) ``aws-chunked`` upload checksum, which streams ``PutObject`` without
+        a ``Content-Length`` header -- Ceph RGW rejects that with
+        ``MissingContentLength``. With it off, s3fs sends a plain ``PutObject`` with
+        ``Content-Length``, the same way Icechunk's Rust S3 client already does.
+        """
+        import s3fs
+
+        return s3fs.S3FileSystem(
+            key=self.access_key_id,
+            secret=self.secret_access_key,
+            use_ssl=self.endpoint_url.lower().startswith("https://"),
+            client_kwargs={"endpoint_url": self.endpoint_url, "region_name": self.region},
+            config_kwargs={
+                "s3": {"addressing_style": "path"},  # Ceph RGW path addressing
+                "request_checksum_calculation": "when_required",
+                "response_checksum_validation": "when_required",
+            },
+        )
+
     def open_repo(self, prefix: str):
         """Open an existing repo at ``prefix``; raises if it isn't there."""
         return open_repo(self.storage(prefix))

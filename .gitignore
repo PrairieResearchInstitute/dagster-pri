@@ -209,3 +209,5 @@ __marimo__/
 .tmp_dagster_home_*/
 tmp/
 dagster_home/
+
+data/
