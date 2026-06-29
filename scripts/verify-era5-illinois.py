@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import icechunk
 
-DEFAULT_ZARR_PREFIX = "era5/STATE=IL"
+DEFAULT_ZARR_PREFIX = "era5-land/icechunk/IL"
 
 
 # --------------------------------------------------------------------------- #

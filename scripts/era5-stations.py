@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, NamedTuple
 if TYPE_CHECKING:
     import icechunk
 
-DEFAULT_ZARR_PREFIX = "era5/STATE=IL"
+DEFAULT_ZARR_PREFIX = "era5-land/icechunk/IL"
 DEFAULT_OUT = "scratch/era5_station_daily.csv"
 
 # ERA5-Land variable names as stored. The CDS NetCDF carries short names and the

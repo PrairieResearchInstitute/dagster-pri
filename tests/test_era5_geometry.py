@@ -26,8 +26,8 @@ def test_normalize_stusps_rejects_non_codes(bad):
 
 
 def test_repo_prefix():
-    assert repo_prefix("il") == "era5/STATE=IL"
-    assert repo_prefix("IN") == "era5/STATE=IN"
+    assert repo_prefix("il") == "era5-land/icechunk/IL"
+    assert repo_prefix("IN") == "era5-land/icechunk/IN"
 
 
 def test_bbox_from_geometry_order_pad_round(tmp_path):

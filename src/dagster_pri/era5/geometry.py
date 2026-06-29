@@ -26,10 +26,11 @@ def normalize_stusps(stusps: str) -> str:
 def repo_prefix(stusps: str) -> str:
     """Bucket prefix for a state's Icechunk repo.
 
-    ``STATE=XX`` is a deliberate Hive-style segment so sibling states live side
-    by side (era5/STATE=IL, era5/STATE=IN, ...).
+    Each state gets a plain per-state folder under ``era5-land/icechunk`` so
+    sibling states live side by side (era5-land/icechunk/IL,
+    era5-land/icechunk/IN, ...).
     """
-    return f"era5/STATE={normalize_stusps(stusps)}"
+    return f"era5-land/icechunk/{normalize_stusps(stusps)}"
 
 
 def get_state_geometry(stusps: str, boundary_path: str | None = None):
