@@ -211,3 +211,5 @@ tmp/
 dagster_home/
 
 data/
+# Tests conducted by claude
+scratch/

@@ -126,6 +126,21 @@ Local credentials and settings are read from `.env` (gitignored). See the
 project's `.env` for the S3-compatible storage endpoint and bucket used by the
 data-loading assets.
 
+### Monthly ERA5-Land backfill (`era5_monthly_sensor`)
+
+`era5_monthly_sensor` walks one state forward a month at a time: each tick it
+queries the landed parquet output in the object store, finds the latest month
+already produced, and launches `era5_monthly_job` (ingest → station summaries)
+for the next month — bounded by a configured start and optional end. It is
+`STOPPED` by default; enable it in the UI once the state's Icechunk store is
+initialized via the `era5_init` job. Configure it with these `.env` vars:
+
+| Variable        | Required | Meaning                                              |
+| --------------- | -------- | ---------------------------------------------------- |
+| `ERA5_START_YM` | yes      | First month to process, `YYYY-MM` (e.g. `2024-01`).  |
+| `ERA5_END_YM`   | no       | Last month, inclusive, `YYYY-MM`. Unbounded if unset.|
+| `ERA5_STATE`    | no       | USPS state code; defaults to `IL`.                   |
+
 ## Learn more
 
 - [Dagster Documentation](https://docs.dagster.io/)

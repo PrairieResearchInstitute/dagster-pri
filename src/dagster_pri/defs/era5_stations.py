@@ -34,6 +34,7 @@ class DailyStationReadingsConfig(dg.Config):
 
 
 @dg.asset(
+    deps=["era5_iceberg"],  # reads what the ingest wrote; orders ingest-then-stations in a job
     description="Per-station daily ERA5-Land summaries (local Central-time day) for "
     "one state/month, written as a parquet file to the object store.",
     kinds={"parquet"},
