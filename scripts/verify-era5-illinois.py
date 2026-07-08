@@ -36,6 +36,9 @@ Run
   # variables share the same populated range, so it inspects a single --var:
   uv run scripts/verify-era5-illinois.py dates --var t2m
 
+  # Storage size of the Icechunk repo (object-store footprint + chunk stats):
+  uv run scripts/verify-era5-illinois.py size
+
 S3/Ceph connection is read from .env exactly like the writer script.
 """
 
@@ -90,6 +93,16 @@ def open_store(prefix: str, branch: str = "main"):
     session = repo.readonly_session(branch)
     ds = xr.open_zarr(session.store, consolidated=False, decode_timedelta=True)
     return repo, ds
+
+
+def human_bytes(n: int) -> str:
+    """Format a byte count as a human-readable binary-unit string (e.g. 1.23 GiB)."""
+    size = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if size < 1024 or unit == "PiB":
+            return f"{size:.2f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.2f} PiB"  # unreachable, keeps type-checkers happy
 
 
 # --------------------------------------------------------------------------- #
@@ -370,6 +383,57 @@ def cmd_dates(args, p) -> int:
     return 0
 
 
+def report_size(repo, storage) -> None:
+    """Report the Icechunk repo's storage size: object-store footprint + chunk stats."""
+    # Icechunk's logical chunk accounting (native/virtual/inlined).
+    print("\n" + "-" * 70)
+    print("CHUNK STORAGE STATS (Icechunk accounting)")
+    print("-" * 70)
+    try:
+        stats = repo.chunk_storage_stats()
+        print(f"  native  : {human_bytes(stats.native_bytes)}")
+        print(f"  virtual : {human_bytes(stats.virtual_bytes)}  (references to external data)")
+        print(f"  inlined : {human_bytes(stats.inlined_bytes)}")
+        print(f"  total   : {human_bytes(stats.total_bytes())}")
+    except Exception as e:  # noqa: BLE001 -- API drift shouldn't kill the report
+        print(f"  (could not read chunk_storage_stats: {e})")
+
+    # Physical object-store footprint: sum every object under the repo prefix.
+    print("\n" + "-" * 70)
+    print("OBJECT-STORE FOOTPRINT (physical bytes in the bucket)")
+    print("-" * 70)
+    objs = storage.list_objects_metadata()
+    categories: dict[str, list[int]] = {}
+    grand_total = 0
+    for o in objs:
+        grand_total += o.size_bytes
+        category = o.key.split("/", 1)[0] if "/" in o.key else "other"
+        bucket = categories.setdefault(category, [0, 0])
+        bucket[0] += o.size_bytes
+        bucket[1] += 1
+    for category in sorted(categories):
+        total_bytes, count = categories[category]
+        print(f"  {category:18s} {human_bytes(total_bytes):>12s}  ({count} objects)")
+    print("-" * 70)
+    print(f"  {'TOTAL':18s} {human_bytes(grand_total):>12s}  ({len(objs)} objects)")
+
+
+def cmd_size(args, p) -> int:
+    """Report the storage size of the Icechunk repo."""
+    import icechunk
+
+    _load_env_and_check(p)
+
+    print(f"Opening Icechunk repo s3://{os.environ['BUCKET_NAME']}/{args.prefix}")
+    storage = make_icechunk_storage(args.prefix)
+    repo = icechunk.Repository.open(storage)
+
+    report_size(repo, storage)
+
+    print("\nDone.")
+    return 0
+
+
 def _add_common_args(sp) -> None:
     """Args shared by every subcommand."""
     sp.add_argument(
@@ -409,6 +473,16 @@ def main(argv=None) -> int:
     )
     _add_common_args(p_dates)
     p_dates.set_defaults(func=cmd_dates)
+
+    p_size = sub.add_parser(
+        "size",
+        help="Report the storage size of the Icechunk repo (object-store footprint + chunk stats).",
+    )
+    p_size.add_argument(
+        "--prefix", default=DEFAULT_ZARR_PREFIX, help="Icechunk repo prefix inside the bucket."
+    )
+    p_size.add_argument("--branch", default="main", help="Icechunk branch (default: main).")
+    p_size.set_defaults(func=cmd_size)
 
     args = p.parse_args(argv)
     return args.func(args, p)
