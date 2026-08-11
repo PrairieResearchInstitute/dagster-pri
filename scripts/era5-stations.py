@@ -76,14 +76,10 @@ STATIONS: list[Station] = [
 # Icechunk storage / repo (mirrors era5-illinois.py / verify-era5-illinois.py)
 # --------------------------------------------------------------------------- #
 def make_icechunk_storage(prefix: str) -> icechunk.Storage:
-    """Icechunk S3 storage pointed at the OSN/Ceph endpoint from .env.
-
-    Accept either S3_ENDPOINT_URL (what the writer documents) or AWS_ENDPOINT_URL
-    (what this project's .env actually uses), matching the verifier script.
-    """
+    """Icechunk S3 storage pointed at the S3 endpoint from .env."""
     import icechunk
 
-    endpoint = os.environ.get("S3_ENDPOINT_URL") or os.environ["AWS_ENDPOINT_URL"]
+    endpoint = os.environ["AWS_ENDPOINT_URL"]
     return icechunk.s3_storage(
         bucket=os.environ["BUCKET_NAME"],
         prefix=prefix,

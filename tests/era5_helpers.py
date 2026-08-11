@@ -94,17 +94,27 @@ def write_raw_era5_nc(
     return target
 
 
-def square_boundary_geojson(
-    path: Path, stusps: str = "IL", *, lon=(-90.0, -88.0), lat=(40.0, 42.0)
+def square_clip_mask_parquet(
+    root: Path, stusps: str = "IL", *, lon=(-90.0, -88.0), lat=(40.0, 42.0)
 ) -> Path:
-    """Write a one-row GeoJSON with a STUSPS column and a square polygon."""
+    """Write a square clip mask where :func:`get_state_geometry` looks for it.
+
+    Mirrors the published layout under ``root`` (which stands in for the bucket
+    root): ``<root>/<PREFIX>/<CODE>/<code>_huc8_clip_mask.parquet``.
+    """
     import geopandas as gpd
     from shapely.geometry import box
 
+    from dagster_pri.era5.geometry import CLIP_MASK_PREFIX, normalize_stusps
+
+    code = normalize_stusps(stusps)
+    path = root / CLIP_MASK_PREFIX / code / f"{code.lower()}_huc8_clip_mask.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
     gdf = gpd.GeoDataFrame(
-        {"STUSPS": [stusps]},
+        {"state": [code]},
         geometry=[box(lon[0], lat[0], lon[1], lat[1])],
         crs="EPSG:4326",
     )
-    gdf.to_file(path, driver="GeoJSON")
+    gdf.to_parquet(path)
     return path

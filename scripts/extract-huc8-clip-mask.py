@@ -10,9 +10,12 @@ Every HUC8 in the WBD is delineated regardless of state lines, so a watershed
 that only partly overlaps the state is still stored whole. Dissolving every
 HUC8 whose `states` attribute mentions the target state therefore yields the
 union of the state's territory with all watersheds that drain through it --
-exactly the geometry ``era5.geometry.get_state_geometry`` needs when passed
-as ``boundary_path`` to clip ERA5 to "state plus its watersheds" instead of
-the bare political boundary.
+exactly the geometry the ERA5 ingest clips to ("state plus its watersheds"
+instead of the bare political boundary).
+
+Upload the output to the public clip-mask bucket at
+``s3://public/shapefiles/state-watershed/<CODE>/<code>_huc8_clip_mask.parquet``;
+that is where ``era5.geometry.get_state_geometry`` reads it from.
 
 The Lake Michigan HUC8 (04190000) is excluded by default: it is open water
 shared with IN/MI/WI, not a terrestrial drainage basin, and including it

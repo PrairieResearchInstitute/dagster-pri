@@ -60,17 +60,16 @@ DEFAULT_ZARR_PREFIX = "era5-land/icechunk/IL"
 # Icechunk storage / repo (mirrors era5-illinois.py so the two stay in sync)
 # --------------------------------------------------------------------------- #
 def make_icechunk_storage(prefix: str) -> icechunk.Storage:
-    """Icechunk S3 storage pointed at the OSN/Ceph endpoint from .env.
+    """Icechunk S3 storage pointed at the S3 endpoint from .env.
 
     Ceph compatibility is handled here: force_path_style mirrors s3fs's
-    addressing_style="path", and endpoint_url points at OSN instead of AWS.
+    addressing_style="path", and endpoint_url points at that endpoint, not AWS.
     Icechunk's Rust S3 client ignores the botocore AWS_*_CHECKSUM_* env vars, so
-    none are set on this path. Accept either S3_ENDPOINT_URL (what the writer
-    documents) or AWS_ENDPOINT_URL (what this project's .env actually uses).
+    none are set on this path.
     """
     import icechunk
 
-    endpoint = os.environ.get("S3_ENDPOINT_URL") or os.environ["AWS_ENDPOINT_URL"]
+    endpoint = os.environ["AWS_ENDPOINT_URL"]
     return icechunk.s3_storage(
         bucket=os.environ["BUCKET_NAME"],
         prefix=prefix,

@@ -1,7 +1,11 @@
-"""State boundary resolution, bounding box, and per-state Icechunk prefix.
+"""State clip-mask resolution, bounding box, and per-state Icechunk prefix.
 
-Generalized from the Illinois-only original so any US state (by USPS code) can
-be ingested into its own sibling Icechunk repo.
+The clip mask for a state is the dissolved union of every HUC8 watershed that
+drains through it (see ``scripts/extract-huc8-clip-mask.py``) -- i.e. the state
+plus its watersheds, not the bare political boundary. Masks are published as one
+GeoParquet object per state, keyed by USPS code, in the same bucket as the
+Icechunk stores, and are read through the same filesystem/credentials
+(:class:`dagster_pri.defs.resources.IcechunkStorageResource`).
 """
 
 from __future__ import annotations
@@ -10,9 +14,8 @@ import logging
 
 log = logging.getLogger("era5land")
 
-# US Census 2022 cartographic boundary, state level (1:500k). Carries a STUSPS
-# column for every state/territory, so filtering by code generalizes for free.
-CENSUS_STATES_ZIP = "https://www2.census.gov/geo/tiger/GENZ2022/shp/cb_2022_us_state_500k.zip"
+# Object layout of the published per-state HUC8 clip masks within the bucket.
+CLIP_MASK_PREFIX = "shapefiles/state-watershed"
 
 
 def normalize_stusps(stusps: str) -> str:
@@ -33,55 +36,45 @@ def repo_prefix(stusps: str) -> str:
     return f"era5-land/icechunk/{normalize_stusps(stusps)}"
 
 
-def get_state_geometry(stusps: str, boundary_path: str | None = None):
-    """Return a single-row GeoDataFrame (EPSG:4326) for the given state.
+def clip_mask_path(bucket: str, stusps: str) -> str:
+    """Bucket-prefixed object path of a state's clip-mask GeoParquet.
 
-    With no ``boundary_path`` the US Census cartographic boundary is downloaded
-    and filtered by STUSPS. With a ``boundary_path`` (shapefile/GeoJSON), the
-    requested state is isolated by matching the code against any code-bearing
-    column.
+    Bucket-prefixed rather than ``s3://``-schemed, matching how the rest of the
+    codebase addresses objects through an fsspec filesystem.
+    """
+    code = normalize_stusps(stusps)
+    return f"{bucket}/{CLIP_MASK_PREFIX}/{code}/{code.lower()}_huc8_clip_mask.parquet"
+
+
+def get_state_geometry(fs, bucket: str, stusps: str):
+    """Return a single-row GeoDataFrame (EPSG:4326) with the state's clip mask.
+
+    Reads the published GeoParquet for ``stusps`` through ``fs``/``bucket``,
+    normally ``IcechunkStorageResource.filesystem()`` and its ``bucket`` (tests
+    pass a local filesystem and a directory standing in for the bucket).
     """
     import geopandas as gpd
 
     code = normalize_stusps(stusps)
+    path = clip_mask_path(bucket, code)
 
-    if boundary_path:
-        log.info("Reading boundary from %s", boundary_path)
-        gdf = gpd.read_file(boundary_path)
-        # If a multi-state file was supplied, isolate the requested state by the
-        # first recognized code/name column. A recognized column with no match
-        # yields an empty frame (and the empty check below raises). A file with
-        # none of these columns is assumed to already be a single state.
-        wanted = {code, _full_name(gdf, code)}
-        for col in ("STUSPS", "STATE_ABBR", "NAME", "state"):
-            if col in gdf.columns:
-                gdf = gdf[gdf[col].astype(str).str.upper().isin(wanted)]
-                break
-    else:
-        log.info("Downloading %s boundary from US Census...", code)
-        gdf = gpd.read_file(CENSUS_STATES_ZIP)
-        gdf = gdf[gdf["STUSPS"] == code]
+    log.info("Reading %s clip mask from %s", code, path)
+    try:
+        with fs.open(path, "rb") as f:
+            gdf = gpd.read_parquet(f)
+    except FileNotFoundError as e:
+        raise ValueError(
+            f"No clip mask for {code} at {path!r}. Build one with "
+            f"scripts/extract-huc8-clip-mask.py --state {code} and upload it there."
+        ) from e
 
     if gdf.empty:
-        raise ValueError(f"Could not locate the {code} polygon in the boundary source.")
+        raise ValueError(f"The {code} clip mask at {path!r} holds no geometry.")
 
     gdf = gdf.to_crs("EPSG:4326")
     # Dissolve in case of multipart rows.
     gdf = gdf.dissolve().reset_index(drop=True)
     return gdf[["geometry"]]
-
-
-def _full_name(gdf, code: str) -> str:
-    """Best-effort full state name for ``code`` from a NAME/STUSPS-bearing file.
-
-    Returns the code itself if no mapping can be found, so the membership test in
-    :func:`get_state_geometry` stays a no-op rather than matching nothing.
-    """
-    if "STUSPS" in gdf.columns and "NAME" in gdf.columns:
-        match = gdf[gdf["STUSPS"].astype(str).str.upper() == code]
-        if len(match):
-            return str(match["NAME"].iloc[0]).upper()
-    return code
 
 
 def bbox_from_geometry(gdf, pad_deg: float = 0.25) -> list[float]:

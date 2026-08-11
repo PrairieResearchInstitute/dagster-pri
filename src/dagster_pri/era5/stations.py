@@ -35,6 +35,10 @@ DEFAULT_TZ = "America/Chicago"
 # Output value columns, in display order.
 VALUE_COLS = ["t2m_max_c", "t2m_min_c", "t2m_mean_c", "d2m_mean_c", "precip_total_mm"]
 
+# Hourly output value columns, in native ERA5 units as stored (t2m/d2m in Kelvin,
+# tp the raw accumulation-since-00Z in metres). Kept raw and unconverted.
+HOURLY_VALUE_COLS = [V_T2M, V_TP, V_D2M]
+
 
 class Station(NamedTuple):
     id: str
@@ -75,6 +79,22 @@ def padded_utc_slice(ds: xr.Dataset, year: int, month: int) -> xr.Dataset:
     last_day = calendar.monthrange(year, month)[1]
     start = pd.Timestamp(year, month, 1) - pd.Timedelta(days=1)
     end = pd.Timestamp(year, month, last_day, 23) + pd.Timedelta(days=1)
+    return ds.sel(time=slice(start, end))
+
+
+def utc_month_slice(ds: xr.Dataset, year: int, month: int) -> xr.Dataset:
+    """Slice ``ds`` to exactly the requested UTC calendar month (no padding).
+
+    The store's ``time`` axis is hourly UTC, so an unpadded slice from ``00:00`` of
+    the first day through ``23:00`` of the last day is precisely the month. Unlike
+    :func:`padded_utc_slice` there is no local-day conversion here, so no neighbouring
+    hours are needed.
+    """
+    import pandas as pd
+
+    last_day = calendar.monthrange(year, month)[1]
+    start = pd.Timestamp(year, month, 1)
+    end = pd.Timestamp(year, month, last_day, 23)
     return ds.sel(time=slice(start, end))
 
 
@@ -171,4 +191,29 @@ def to_dataframe(daily: xr.Dataset, stations: list[Station]) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     for col in VALUE_COLS:
         df[col] = df[col].round(3)
+    return df
+
+
+def hourly_to_dataframe(pts: xr.Dataset, stations: list[Station]) -> pd.DataFrame:
+    """(time, station) point Dataset -> tidy hourly DataFrame, native UTC + units.
+
+    One row per (station, UTC hour). Values are the raw store values, unconverted
+    and unrounded: ``t2m``/``d2m`` in Kelvin and ``tp`` the raw accumulation in
+    metres. The ``time_utc`` column is the store's naive-UTC hourly stamp as-is.
+
+    Drops stations whose nearest cell is entirely NaN (outside the clip footprint)
+    via ``dropna(how="all")`` on the value columns. The explicit final column
+    selection also drops the ``latitude``/``longitude`` coords that
+    :func:`extract_points` attaches per station.
+    """
+
+    df = pts[HOURLY_VALUE_COLS].to_dataframe().reset_index()
+    df = df.rename(columns={"time": "time_utc", "station": "station_id"})
+    df = df.dropna(how="all", subset=HOURLY_VALUE_COLS)
+
+    name_by_id = {s.id: s.name for s in stations}
+    df["station_name"] = df["station_id"].map(name_by_id)
+
+    df = df[["station_id", "station_name", "time_utc", *HOURLY_VALUE_COLS]]
+    df = df.sort_values(["station_id", "time_utc"]).reset_index(drop=True)
     return df

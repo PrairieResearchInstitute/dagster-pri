@@ -42,7 +42,6 @@ class Era5InitConfig(dg.Config):
     variables: list[str] = DEFAULT_VARIABLES
     time_chunk: int = 24  # hours per chunk; must divide 24
     bbox_pad: float = 0.25
-    boundary_path: str | None = None
     work_dir: str | None = None
     ndays: int | None = None  # only fetch the first N days (for testing)
 
@@ -62,7 +61,7 @@ def init_state_store(
     times = global_axis(axis_end)
     context.log.info("Global axis: %s .. %s (%d hourly steps)", times[0], times[-1], len(times))
 
-    gdf = get_state_geometry(state, config.boundary_path)
+    gdf = get_state_geometry(icechunk.filesystem(), icechunk.bucket, state)
     area = bbox_from_geometry(gdf, pad_deg=config.bbox_pad)
     context.log.info("%s bbox [N, W, S, E] = %s", state, area)
 

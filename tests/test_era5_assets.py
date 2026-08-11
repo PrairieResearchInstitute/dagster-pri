@@ -10,7 +10,7 @@ import dagster as dg
 import numpy as np
 import pytest
 import xarray as xr
-from era5_helpers import month_index, square_boundary_geojson
+from era5_helpers import month_index
 
 from dagster_pri.defs.era5_ingest import Era5IngestConfig, era5_iceberg
 from dagster_pri.defs.era5_init import Era5InitConfig, era5_init
@@ -56,15 +56,21 @@ class LocalIcechunkStorageResource(IcechunkStorageResource):
         path.mkdir(parents=True, exist_ok=True)
         return icechunk.local_filesystem_storage(str(path))
 
+    def filesystem(self):
+        """Local disk in place of s3fs, so ``bucket`` reads resolve under tmp_path."""
+        import fsspec
+
+        return fsspec.filesystem("local")
+
 
 @pytest.fixture
-def resources(tmp_path):
+def resources(tmp_path, bucket_root):
     # Dummy connection fields: the fakes override storage()/get_client(), but
     # Dagster still resolves the (otherwise EnvVar) config, so give it values.
     return {
         "icechunk": LocalIcechunkStorageResource(
             base_dir=str(tmp_path / "store"),
-            bucket="test",
+            bucket=str(bucket_root),
             endpoint_url="http://test",
             access_key_id="x",
             secret_access_key="y",
@@ -92,16 +98,10 @@ def _ingest_config(year: int, month: int, work_dir: Path) -> Era5IngestConfig:
     )
 
 
-def _boundary(tmp_path: Path) -> str:
-    return str(square_boundary_geojson(tmp_path / "il.geojson", stusps="IL"))
-
-
-def test_init_then_ingest_out_of_order(resources, tmp_path):
+def test_init_then_ingest_out_of_order(resources, tmp_path, local_clip_mask):
     work = tmp_path / "work"
-    boundary = _boundary(tmp_path)
 
     init_cfg = _init_config(work)
-    init_cfg = init_cfg.model_copy(update={"boundary_path": boundary})
     init_result = era5_init.execute_in_process(
         run_config=dg.RunConfig(ops={"init_state_store": init_cfg}), resources=resources
     )
@@ -109,7 +109,7 @@ def test_init_then_ingest_out_of_order(resources, tmp_path):
 
     # Ingest February, then January -- out of order region writes.
     for month in (2, 1):
-        cfg = _ingest_config(1950, month, work).model_copy(update={"boundary_path": boundary})
+        cfg = _ingest_config(1950, month, work)
         result = dg.materialize(
             [era5_iceberg],
             run_config=dg.RunConfig(ops={"era5_iceberg": cfg}),
@@ -128,9 +128,9 @@ def test_init_then_ingest_out_of_order(resources, tmp_path):
     assert np.all(ds["2m_temperature"].sel(time="1950-02-01T00:00").values == 2.0)
 
 
-def test_ingest_without_init_fails_clearly(resources, tmp_path):
+def test_ingest_without_init_fails_clearly(resources, tmp_path, local_clip_mask):
     work = tmp_path / "work"
-    cfg = _ingest_config(1950, 1, work).model_copy(update={"boundary_path": _boundary(tmp_path)})
+    cfg = _ingest_config(1950, 1, work)
     result = dg.materialize(
         [era5_iceberg],
         run_config=dg.RunConfig(ops={"era5_iceberg": cfg}),

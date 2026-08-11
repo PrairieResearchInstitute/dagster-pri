@@ -32,7 +32,6 @@ class Era5IngestConfig(dg.Config):
     month: int = 1  # 1-12
     variables: list[str] = DEFAULT_VARIABLES
     bbox_pad: float = 0.25
-    boundary_path: str | None = None
     work_dir: str | None = None
     ndays: int | None = None  # only fetch the first N days (for testing)
 
@@ -51,7 +50,7 @@ def era5_iceberg(
     state = normalize_stusps(config.state)
     prefix = repo_prefix(state)
 
-    gdf = get_state_geometry(state, config.boundary_path)
+    gdf = get_state_geometry(icechunk.filesystem(), icechunk.bucket, state)
     area = bbox_from_geometry(gdf, pad_deg=config.bbox_pad)
     context.log.info("%s bbox [N, W, S, E] = %s", state, area)
 

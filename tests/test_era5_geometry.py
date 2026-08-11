@@ -1,10 +1,11 @@
-"""Unit tests for geometry helpers (no Census download)."""
+"""Unit tests for geometry helpers (no network: masks are read from tmp_path)."""
 
 import pytest
-from era5_helpers import square_boundary_geojson
+from era5_helpers import square_clip_mask_parquet
 
 from dagster_pri.era5.geometry import (
     bbox_from_geometry,
+    clip_mask_path,
     get_state_geometry,
     normalize_stusps,
     repo_prefix,
@@ -30,33 +31,31 @@ def test_repo_prefix():
     assert repo_prefix("IN") == "era5-land/icechunk/IN"
 
 
-def test_bbox_from_geometry_order_pad_round(tmp_path):
-    square_boundary_geojson(tmp_path / "b.geojson", lon=(-90.0, -88.0), lat=(40.0, 42.0))
-    gdf = get_state_geometry("IL", str(tmp_path / "b.geojson"))
+def test_clip_mask_path_keys_on_the_postal_code():
+    assert clip_mask_path("public", "in") == (
+        "public/shapefiles/state-watershed/IN/in_huc8_clip_mask.parquet"
+    )
+
+
+def test_bbox_from_geometry_order_pad_round(local_fs, bucket_root):
+    square_clip_mask_parquet(bucket_root, "IL", lon=(-90.0, -88.0), lat=(40.0, 42.0))
+    gdf = get_state_geometry(local_fs, str(bucket_root), "IL")
     # [North, West, South, East], padded 0.25, rounded to 3 dp.
     assert bbox_from_geometry(gdf, pad_deg=0.25) == [42.25, -90.25, 39.75, -87.75]
 
 
-def test_get_state_geometry_isolates_requested_state(tmp_path):
-    import geopandas as gpd
-    from shapely.geometry import box
+def test_get_state_geometry_reads_the_requested_state(local_fs, bucket_root):
+    square_clip_mask_parquet(bucket_root, "IL", lon=(-91.0, -87.0), lat=(37.0, 42.0))
+    square_clip_mask_parquet(bucket_root, "IN", lon=(-88.0, -84.0), lat=(37.0, 41.0))
 
-    multi = gpd.GeoDataFrame(
-        {"STUSPS": ["IL", "IN"]},
-        geometry=[box(-91, 37, -87, 42), box(-88, 37, -84, 41)],
-        crs="EPSG:4326",
-    )
-    path = tmp_path / "states.geojson"
-    multi.to_file(path, driver="GeoJSON")
-
-    gdf = get_state_geometry("IN", str(path))
+    gdf = get_state_geometry(local_fs, str(bucket_root), "IN")
     assert len(gdf) == 1  # dissolved to a single row
-    assert str(gdf.crs).upper().endswith("4326")
-    # Indiana's western edge is -88, so the bbox west must be ~ -88 (± pad), not -91.
+    assert gdf.crs.to_epsg() == 4326
+    # Indiana's mask starts at -88, so the west bound must be -88, not Illinois' -91.
     assert gdf.total_bounds[0] == pytest.approx(-88.0)
 
 
-def test_get_state_geometry_missing_state_raises(tmp_path):
-    p = square_boundary_geojson(tmp_path / "b.geojson", stusps="IL")
+def test_get_state_geometry_missing_mask_raises(local_fs, bucket_root):
+    square_clip_mask_parquet(bucket_root, "IL")
     with pytest.raises(ValueError, match="WY"):
-        get_state_geometry("WY", str(p))
+        get_state_geometry(local_fs, str(bucket_root), "WY")

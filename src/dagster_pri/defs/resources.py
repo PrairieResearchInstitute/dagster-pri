@@ -14,16 +14,16 @@ from dagster_pri.era5.store import open_or_create_repo, open_repo
 
 
 class IcechunkStorageResource(dg.ConfigurableResource):
-    """Builds Icechunk S3 storage pointed at the OSN/Ceph endpoint.
+    """Builds Icechunk S3 storage pointed at the S3 endpoint from ``.env``.
 
     Ceph compatibility is handled here: ``force_path_style`` mirrors s3fs's
-    ``addressing_style="path"`` and ``endpoint_url`` points at OSN instead of
-    AWS. Icechunk's Rust S3 client ignores the botocore AWS_*_CHECKSUM_* env
-    vars, so none are set on this path.
+    ``addressing_style="path"`` and ``endpoint_url`` points at that endpoint
+    instead of AWS. Icechunk's Rust S3 client ignores the botocore
+    AWS_*_CHECKSUM_* env vars, so none are set on this path.
     """
 
     bucket: str = dg.EnvVar("BUCKET_NAME")
-    endpoint_url: str = dg.EnvVar("S3_ENDPOINT_URL")
+    endpoint_url: str = dg.EnvVar("AWS_ENDPOINT_URL")
     access_key_id: str = dg.EnvVar("AWS_ACCESS_KEY_ID")
     secret_access_key: str = dg.EnvVar("AWS_SECRET_ACCESS_KEY")
     region: str = "us-east-1"  # Ceph ignores it but the client wants one
