@@ -19,6 +19,14 @@ from dagster_pri.era5.geometry import repo_prefix
 from dagster_pri.era5.store import open_store_dataset
 
 VARS = ["2m_temperature", "total_precipitation"]
+# Narrowing `variables` means narrowing `accumulated_variables` to match: the
+# default names every accumulation in the *default* download, none of which these
+# tests ask CDS for.
+ACCUM = ["total_precipitation"]
+# The synthetic CDS client names data vars after the request's CDS long names, so
+# the derived accumulation array is spelled with the long name here (a real
+# download carries short names, giving "tp_hourly").
+DERIVED_VAR = "total_precipitation_hourly"
 
 
 class _SynthCDSClient:
@@ -86,6 +94,7 @@ def _init_config(work_dir: Path) -> Era5InitConfig:
         ref_month=1,
         axis_end="1950-02-28T23:00",
         variables=VARS,
+        accumulated_variables=ACCUM,
         time_chunk=24,
         ndays=2,
         work_dir=str(work_dir),
@@ -94,7 +103,13 @@ def _init_config(work_dir: Path) -> Era5InitConfig:
 
 def _ingest_config(year: int, month: int, work_dir: Path) -> Era5IngestConfig:
     return Era5IngestConfig(
-        state="IL", year=year, month=month, variables=VARS, ndays=2, work_dir=str(work_dir)
+        state="IL",
+        year=year,
+        month=month,
+        variables=VARS,
+        accumulated_variables=ACCUM,
+        ndays=2,
+        work_dir=str(work_dir),
     )
 
 
@@ -126,6 +141,69 @@ def test_init_then_ingest_out_of_order(resources, tmp_path, local_clip_mask):
     ds = open_store_dataset(repo)
     assert np.all(ds["2m_temperature"].sel(time="1950-01-01T00:00").values == 1.0)
     assert np.all(ds["2m_temperature"].sel(time="1950-02-01T00:00").values == 2.0)
+
+
+def test_accumulated_variable_gets_a_derived_hourly_array(resources, tmp_path, local_clip_mask):
+    work = tmp_path / "work"
+    assert era5_init.execute_in_process(
+        run_config=dg.RunConfig(ops={"init_state_store": _init_config(work)}), resources=resources
+    ).success
+
+    result = dg.materialize(
+        [era5_iceberg],
+        run_config=dg.RunConfig(ops={"era5_iceberg": _ingest_config(1950, 1, work)}),
+        resources=resources,
+    )
+    assert result.success
+    meta = result.asset_materializations_for_node("era5_iceberg")[0].metadata
+    assert meta["accumulated_variables"].value == ["total_precipitation"]
+
+    ds = open_store_dataset(resources["icechunk"].open_repo(repo_prefix("IL")))
+    # The derived array joined the schema; the raw accumulation is still there.
+    assert {"total_precipitation", DERIVED_VAR} <= set(ds.data_vars)
+
+    derived = ds[DERIVED_VAR]
+    # The synthetic month is a constant 1.0 accumulation, so: NaN at the block's
+    # first step, the raw value at 01:00 (post-reset), and 0.0 differences after.
+    assert np.isnan(derived.sel(time="1950-01-01T00:00").values).all()
+    assert np.all(derived.sel(time="1950-01-01T01:00").values == 1.0)
+    assert np.all(derived.sel(time="1950-01-01T02:00").values == 0.0)
+    # An unwritten hour still reads as the NaN fill, not 0.
+    assert np.isnan(derived.sel(time="1950-02-15T03:00").values).all()
+
+
+def test_ingest_splits_variables_across_cds_requests(resources, tmp_path, local_clip_mask):
+    """One variable per request: every batch lands and merges back into one month."""
+    work = tmp_path / "work"
+    init_cfg = _init_config(work)
+    init_cfg = init_cfg.model_copy(update={"variables_per_request": 1})
+    assert era5_init.execute_in_process(
+        run_config=dg.RunConfig(ops={"init_state_store": init_cfg}), resources=resources
+    ).success
+
+    cfg = _ingest_config(1950, 2, work).model_copy(update={"variables_per_request": 1})
+    result = dg.materialize(
+        [era5_iceberg],
+        run_config=dg.RunConfig(ops={"era5_iceberg": cfg}),
+        resources=resources,
+    )
+    assert result.success
+    meta = result.asset_materializations_for_node("era5_iceberg")[0].metadata
+    assert meta["cds_requests"].value == len(VARS)
+
+    # One staged NetCDF per variable batch, for both the init and ingest months.
+    assert sorted(p.name for p in work.glob("*.nc")) == [
+        "era5land_il_195001_b00.nc",
+        "era5land_il_195001_b01.nc",
+        "era5land_il_195002_b00.nc",
+        "era5land_il_195002_b01.nc",
+    ]
+
+    ds = open_store_dataset(resources["icechunk"].open_repo(repo_prefix("IL")))
+    for var in (*VARS, DERIVED_VAR):
+        assert var in ds.data_vars
+    assert np.all(ds["2m_temperature"].sel(time="1950-02-01T00:00").values == 2.0)
+    assert np.all(ds["total_precipitation"].sel(time="1950-02-01T00:00").values == 2.0)
 
 
 def test_ingest_without_init_fails_clearly(resources, tmp_path, local_clip_mask):

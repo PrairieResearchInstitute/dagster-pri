@@ -93,6 +93,37 @@ This guarantees the template grid is byte-identical to every later month's grid.
 Consequence: `--variables` must be identical for init and all subsequent month
 ingests. Adding a variable later means creating a new array, not a region write.
 
+`init_store` now refuses this case outright rather than silently re-running
+`to_zarr(mode="w")` over a populated store, which would have dropped every
+ingested month. Changing the variable set means deleting the store prefix,
+re-initing, and re-ingesting.
+
+### 2b. Accumulated variables get a derived per-hour array
+ERA5-Land's `total_precipitation` (and its siblings: snowfall, evaporation,
+radiation, runoff) are **running accumulations since 00:00 UTC that reset daily**,
+not per-hour amounts. Every consumer would otherwise have to redo the reset math.
+
+Which variables accumulate is documented by ERA5-Land, not inferable from the
+data, so `dagster_pri.era5.accumulation.ACCUMULATED_SHORT_NAMES` carries that list
+(and doubles as the CDS-long-name → CF-short-name map). Every accumulated variable
+in the default download therefore gets a second array, `<short>_hourly` — `tp`
+keeps the raw accumulation and `tp_hourly` holds the per-hour increment. The kernel lives in
+`dagster_pri.era5.accumulation` and is shared with the daily station aggregation:
+
+    hourly(t) = raw(t) - raw(t-1)   for t = 02:00 .. 23:00 and 00:00
+    hourly(t) = raw(t)              for t = 01:00  (first step after the reset)
+    hourly(t) = NaN                 when t-1 is outside the ingested block
+
+Since a CDS month spans 00:00 day 1 .. 23:00 last day, only the month's very first
+step is NaN; it is filled by no one (the predecessor lives in the previous month's
+file). Negative increments are clamped to 0 — accumulations are monotonic within a
+UTC day, so any negative is differencing noise.
+
+`accumulated_variables` defaults to exactly that set and can be narrowed (`[]`
+disables de-accumulation entirely) to trade derived arrays for store size. Because
+the derived arrays are part of the variable set, it must be identical for init and
+every ingest, exactly like `variables`.
+
 ### 3. Explicit `init` subcommand instead of auto-probe
 The current script auto-decides create-vs-append by probing. Under parallel
 orchestration that races. Split into subcommands:

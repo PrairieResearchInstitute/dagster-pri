@@ -80,17 +80,35 @@ def init_store(repo, times, ref_clipped, time_chunk: int) -> bool:
 
     Idempotent: a no-op if the axis already exists. Returns True if it wrote the
     template, False if it was already initialized.
+
+    Refuses to re-template a store that already holds a DIFFERENT variable set:
+    the write below is ``mode="w"``, so proceeding would drop the existing arrays
+    and every month already ingested into them.
     """
     from zarr.codecs import BloscCodec, BloscShuffle
 
     var_names = list(ref_clipped.data_vars)
-    if axis_initialized(_open_store_dataset_or_none(repo), len(times), var_names):
+    existing = _open_store_dataset_or_none(repo)
+    if axis_initialized(existing, len(times), var_names):
         log.info(
             "Axis already initialized (time >= %d, vars=%s); skipping template.",
             len(times),
             var_names,
         )
         return False
+
+    # An axis already on disk means real data may be there too; only a repo that
+    # never got a template is safe to write with mode="w".
+    if existing is not None and "time" in existing.dims:
+        store_vars = set(existing.data_vars)
+        if store_vars != set(var_names):
+            raise ValueError(
+                f"the store already holds variables {sorted(store_vars)} but this "
+                f"init would create {sorted(var_names)}. The variable set is fixed "
+                f"when the arrays are created, so adding or removing one is not an "
+                f"init -- re-initializing here would destroy the ingested data. "
+                f"Delete the store prefix and re-init, then re-ingest its months."
+            )
 
     log.info(
         "Initializing full hourly axis %s .. %s (%d steps, chunk=%d)...",
@@ -100,11 +118,21 @@ def init_store(repo, times, ref_clipped, time_chunk: int) -> bool:
         time_chunk,
     )
     session = repo.writable_session("main")
-    template = build_template(times, ref_clipped, time_chunk)
+    template = build_template(times, ref_clipped)
     # zstd compression + NaN fill, fixed once at array-creation; region/append
     # writes inherit it and must not (and do not) re-specify encoding.
     compressors = [BloscCodec(cname="zstd", clevel=5, shuffle=BloscShuffle.shuffle)]
-    encoding = {v: {"fill_value": float("nan"), "compressors": compressors} for v in var_names}
+    # The template is a single dask chunk per variable (see build_template), so
+    # the store's real chunk shape is declared here: `time_chunk` hours by the
+    # whole spatial grid.
+    encoding = {
+        v: {
+            "fill_value": float("nan"),
+            "compressors": compressors,
+            "chunks": (time_chunk, *template[v].shape[1:]),
+        }
+        for v in var_names
+    }
     # icechunk's to_icechunk has no `compute` arg; write the schema directly
     # through the session's Zarr store with compute=False so only metadata +
     # the time coordinate are materialized (no data chunks).

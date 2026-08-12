@@ -4,6 +4,16 @@ Config-driven (state / year / month / variables), mirroring the ``ingest``
 subcommand of ``scripts/era5-illinois.py``. The per-state store must already be
 initialized by the ``era5_init`` job (see :mod:`dagster_pri.defs.era5_init`);
 this asset opens the store loudly and never creates it.
+
+Variables named in ``accumulated_variables`` are running accumulations that reset
+at 00:00 UTC; each also gets a derived ``<short>_hourly`` array holding the
+per-hour increment (see :mod:`dagster_pri.era5.accumulation`). It defaults to every
+accumulated variable in the default download. The same list must be configured for
+``era5_init``, since the store's variable set is fixed when its arrays are created.
+
+The month is retrieved in batches of ``variables_per_request`` variables and the
+batches are merged after clipping, because CDS rejects a whole-month request for
+the full variable set on cost (see :mod:`dagster_pri.era5.cds`).
 """
 
 import tempfile
@@ -12,8 +22,9 @@ from pathlib import Path
 import dagster as dg
 
 from dagster_pri.defs.resources import CDSClientResource, IcechunkStorageResource
+from dagster_pri.era5.accumulation import DEFAULT_ACCUMULATED_VARIABLES, add_hourly_increments
 from dagster_pri.era5.axis import DEFAULT_VARIABLES
-from dagster_pri.era5.cds import download_month, staged_nc_path
+from dagster_pri.era5.cds import DEFAULT_VARIABLES_PER_REQUEST, download_month_batched
 from dagster_pri.era5.geometry import (
     bbox_from_geometry,
     get_state_geometry,
@@ -21,7 +32,7 @@ from dagster_pri.era5.geometry import (
     repo_prefix,
 )
 from dagster_pri.era5.store import validate_variables_against_store, write_month
-from dagster_pri.era5.transform import open_and_clip
+from dagster_pri.era5.transform import open_and_clip_batches
 
 
 class Era5IngestConfig(dg.Config):
@@ -31,6 +42,14 @@ class Era5IngestConfig(dg.Config):
     year: int = 2024
     month: int = 1  # 1-12
     variables: list[str] = DEFAULT_VARIABLES
+    # Accumulations since 00 UTC; each gets an extra "<short>_hourly" array.
+    # Defaults to every accumulated variable in the default download.
+    # Must match what `era5_init` used for this state.
+    accumulated_variables: list[str] = DEFAULT_ACCUMULATED_VARIABLES
+    # Variables per CDS request; the month is fetched as ceil(len(variables) /
+    # this) downloads and merged after clipping. Lower it if CDS answers 403
+    # "cost limits exceeded" (see dagster_pri.era5.cds).
+    variables_per_request: int = DEFAULT_VARIABLES_PER_REQUEST
     bbox_pad: float = 0.25
     work_dir: str | None = None
     ndays: int | None = None  # only fetch the first N days (for testing)
@@ -66,19 +85,27 @@ def era5_iceberg(
 
     work = Path(config.work_dir) if config.work_dir else Path(tempfile.mkdtemp(prefix="era5land_"))
     work.mkdir(parents=True, exist_ok=True)
-    nc_path = staged_nc_path(work, state, config.year, config.month)
-    download_month(
+    nc_paths = download_month_batched(
         cds.get_client(),
         config.year,
         config.month,
         config.variables,
         area,
-        nc_path,
+        work,
+        state,
         ndays=config.ndays,
+        variables_per_request=config.variables_per_request,
     )
 
-    context.log.info("clipping %04d-%02d to %s...", config.year, config.month, state)
-    clipped = open_and_clip(nc_path, gdf)
+    context.log.info(
+        "clipping %04d-%02d (%d file(s)) to %s...",
+        config.year,
+        config.month,
+        len(nc_paths),
+        state,
+    )
+    clipped = open_and_clip_batches(nc_paths, gdf)
+    clipped = add_hourly_increments(clipped, config.accumulated_variables)
     validate_variables_against_store(repo, clipped)
 
     context.log.info("writing %04d-%02d into the store...", config.year, config.month)
@@ -94,6 +121,8 @@ def era5_iceberg(
             "mode": mode,
             "timesteps": n_steps,
             "variables": list(config.variables),
+            "accumulated_variables": list(config.accumulated_variables),
+            "cds_requests": len(nc_paths),
             "prefix": prefix,
         }
     )

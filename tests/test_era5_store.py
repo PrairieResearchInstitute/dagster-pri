@@ -45,6 +45,22 @@ def test_init_store_lays_axis_and_is_idempotent(in_memory_repo):
     )
 
 
+def test_init_store_refuses_to_retemplate_a_different_variable_set(in_memory_repo):
+    """Adding a variable is not an init: mode="w" would drop the ingested months."""
+    times, _ = _init_jan_through(in_memory_repo, "1950-01-31T23:00")
+    jan = make_clipped_ds(month_index(1950, 1, ndays=2), VARS, fill=1.0)
+    write_month(in_memory_repo, jan, 1950, 1)
+
+    grown = make_clipped_ds(month_index(1950, 1, ndays=2), [*VARS, "total_precipitation_hourly"])
+    with pytest.raises(ValueError, match="already holds variables"):
+        init_store(in_memory_repo, times, grown, time_chunk=24)
+
+    # The refusal left the store intact.
+    ds = open_store_dataset(in_memory_repo)
+    assert set(ds.data_vars) == set(VARS)
+    assert np.all(ds["2m_temperature"].sel(time="1950-01-01T00:00").values == 1.0)
+
+
 def test_write_month_region_out_of_order(in_memory_repo):
     _init_jan_through(in_memory_repo, "1950-02-28T23:00")
 

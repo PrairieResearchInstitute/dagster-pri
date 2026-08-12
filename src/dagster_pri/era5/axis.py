@@ -20,12 +20,46 @@ AXIS_START = "1950-01-01T00:00"
 
 # Sensible default surface variables. Override via config.
 DEFAULT_VARIABLES = [
-    "2m_temperature",
-    "total_precipitation",
+    "volumetric_soil_water_layer_1",
+    "volumetric_soil_water_layer_2",
     "2m_dewpoint_temperature",
+    "2m_temperature",
+    "runoff",
+    "soil_temperature_level_1",
+    "skin_temperature",
     "10m_u_component_of_wind",
     "10m_v_component_of_wind",
+    "surface_net_solar_radiation",
+    "total_precipitation",
+    "total_evaporation",
+    "evaporation_from_vegetation_transpiration",
+    "potential_evaporation",
+    "soil_temperature_level_2",
+    "soil_temperature_level_3",
+    "soil_temperature_level_4",
+    "sub_surface_runoff",
+    "surface_latent_heat_flux",
+    "surface_net_thermal_radiation",
     "surface_pressure",
+    "surface_runoff",
+    "surface_sensible_heat_flux",
+    "surface_solar_radiation_downwards",
+    "surface_thermal_radiation_downwards",
+    "volumetric_soil_water_layer_3",
+    "volumetric_soil_water_layer_4",
+    "leaf_area_index_high_vegetation",
+    "evaporation_from_bare_soil",
+    "evaporation_from_open_water_surfaces_excluding_oceans",
+    "forecast_albedo",
+    "leaf_area_index_low_vegetation",
+    "skin_reservoir_content",
+    "snow_cover",
+    "snow_density",
+    "snow_depth",
+    "snow_depth_water_equivalent",
+    "snowfall",
+    "snowmelt",
+    "temperature_of_snow_layer",
 ]
 
 
@@ -63,7 +97,7 @@ def global_axis(axis_end: str) -> pd.DatetimeIndex:
     return pd.date_range(AXIS_START, axis_end, freq="1h")
 
 
-def build_template(times, ref_clipped, time_chunk: int):
+def build_template(times, ref_clipped):
     """All-NaN, dask-backed dataset spanning the full axis on the reference grid.
 
     Built from the reference month's clipped grid + variable set so the template
@@ -71,14 +105,34 @@ def build_template(times, ref_clipped, time_chunk: int):
     (compute=False) so only the 1-D time coordinate + array metadata hit disk --
     no data chunks. The reference month's non-time coords (lat/lon and the
     rioxarray `spatial_ref` CRS coord) are preserved.
+
+    Every variable is ONE dask chunk on purpose, even though the store is written
+    with a 24-hour chunking: the on-disk chunk shape is set through the write's
+    `encoding` (see :func:`dagster_pri.era5.store.init_store`), not by this graph.
+    Chunking the template at the real time chunk instead costs a dask task per
+    chunk -- ~28k per variable over the 1950-.. hourly axis, ~780k in total --
+    which is several GB of graph (and minutes of graph building) before anything
+    is written, and is what used to OOM the init job. Nothing here is ever
+    computed, so the notional size of the single chunk does not matter.
     """
+    import dask.array as da
     import numpy as np
     import xarray as xr
 
     skeleton = ref_clipped.isel(time=0, drop=True)  # spatial grid only
-    nan_like = xr.full_like(skeleton, np.nan)  # same vars/grid/attrs
-    template = nan_like.expand_dims(time=times)  # add the full axis
-    return template.chunk({"time": time_chunk, "latitude": -1, "longitude": -1})
+    nan_vars = {
+        name: xr.DataArray(
+            da.full((len(times), *var.shape), np.nan, dtype=var.dtype, chunks=-1),
+            dims=("time", *var.dims),
+            attrs=dict(var.attrs),
+        )
+        for name, var in skeleton.data_vars.items()
+    }
+    return xr.Dataset(
+        nan_vars,
+        coords={"time": times, **skeleton.coords},
+        attrs=dict(ref_clipped.attrs),
+    )
 
 
 def axis_initialized(store_dataset, n_expected: int, var_names: list[str]) -> bool:

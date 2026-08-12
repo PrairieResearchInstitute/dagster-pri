@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 from era5_helpers import write_raw_era5_nc
 
-from dagster_pri.era5.transform import open_and_clip
+from dagster_pri.era5.transform import (
+    check_variable_count,
+    open_and_clip,
+    open_and_clip_batches,
+)
 
 VARS = ["2m_temperature", "total_precipitation"]
 
@@ -73,3 +77,69 @@ def test_open_and_clip_handles_zipped_payload(tmp_path):
 
     clipped = open_and_clip(zipped, _gdf())
     assert "time" in clipped.dims and set(VARS) == set(clipped.data_vars)
+
+
+def test_open_and_clip_merges_all_members_of_a_zipped_payload(tmp_path):
+    # CDS splits ONE request's variables across data_0.nc, data_1.nc, ... and can
+    # even hand back different longitude conventions per member. Every member must
+    # make it into the dataset; keeping only the first silently loses variables.
+    members = [
+        write_raw_era5_nc(tmp_path / "data_0.nc", 2024, 1, ["2m_temperature"], ndays=1),
+        write_raw_era5_nc(
+            tmp_path / "data_1.nc", 2024, 1, ["total_precipitation"], ndays=1, lon_0_360=True
+        ),
+    ]
+    zipped = tmp_path / "payload.nc"
+    with zipfile.ZipFile(zipped, "w") as zf:
+        for m in members:
+            zf.write(m, arcname=m.name)
+
+    clipped = open_and_clip(zipped, _gdf())
+    assert set(VARS) == set(clipped.data_vars)
+    # The 0..360 member was wrapped onto the same grid, not outer-joined beside it.
+    assert clipped.sizes["longitude"] == 2
+    for var in VARS:
+        assert not np.isnan(clipped[var].values).any()
+    clipped.close()
+
+
+def test_open_and_clip_batches_rejects_an_incomplete_payload(tmp_path):
+    nc = write_raw_era5_nc(tmp_path / "b0.nc", 2024, 1, VARS[:1], ndays=1)
+    ds = open_and_clip_batches([nc], _gdf())
+
+    check_variable_count(ds, VARS[:1])  # complete: no complaint
+    with pytest.raises(ValueError, match="incomplete"):
+        check_variable_count(ds, VARS)
+    ds.close()
+
+
+def test_open_and_clip_batches_merges_variable_batches(tmp_path):
+    batches = [
+        write_raw_era5_nc(tmp_path / f"b{i}.nc", 2024, 1, [var], ndays=1)
+        for i, var in enumerate(VARS)
+    ]
+    merged = open_and_clip_batches(batches, _gdf())
+
+    assert set(VARS) == set(merged.data_vars)
+    assert merged.sizes["time"] == 24
+    # The merged grid is the clipped grid, not an outer join of padded batches.
+    single = open_and_clip(batches[0], _gdf())
+    assert merged.sizes == single.sizes
+    assert not np.isnan(merged["total_precipitation"].values).any()
+    merged.close()
+
+
+def test_open_and_clip_batches_rejects_misaligned_batches(tmp_path):
+    aligned = write_raw_era5_nc(tmp_path / "b0.nc", 2024, 1, [VARS[0]], ndays=1)
+    # A batch that came back with a different grid must not be silently joined.
+    other_grid = write_raw_era5_nc(
+        tmp_path / "b1.nc", 2024, 1, [VARS[1]], ndays=1, lats=[40.0, 40.5, 41.0]
+    )
+    with pytest.raises(ValueError):
+        open_and_clip_batches([aligned, other_grid], _gdf())
+
+
+def test_open_and_clip_batches_passes_a_single_batch_through(tmp_path):
+    nc = write_raw_era5_nc(tmp_path / "b0.nc", 2024, 1, VARS, ndays=1)
+    merged = open_and_clip_batches([nc], _gdf())
+    assert set(VARS) == set(merged.data_vars)

@@ -3,12 +3,13 @@
 import numpy as np
 import pandas as pd
 import pytest
-from era5_helpers import month_index
+from era5_helpers import make_clipped_ds, month_index
 
 from dagster_pri.era5.axis import (
     AXIS_START,
     assert_subset_of_axis,
     axis_initialized,
+    build_template,
     check_time_chunk,
     default_axis_end,
     global_axis,
@@ -63,3 +64,28 @@ def test_assert_subset_of_axis_rejects_non_contiguous():
 
 def test_axis_initialized_predicate():
     assert axis_initialized(None, 10, ["a"]) is False
+
+
+def test_build_template_spans_the_axis_on_the_reference_grid():
+    times = global_axis("1950-02-28T23:00")
+    ref = make_clipped_ds(month_index(1950, 1, ndays=2), ["t2m", "tp"])
+    template = build_template(times, ref)
+
+    assert template.sizes == {"time": len(times), "latitude": 2, "longitude": 2}
+    assert set(template.data_vars) == {"t2m", "tp"}
+    assert "spatial_ref" in template.coords  # rioxarray CRS coord survives
+    assert template["t2m"].dtype == ref["t2m"].dtype
+
+
+def test_build_template_graph_stays_flat_over_the_production_axis():
+    """One dask task per variable, no matter how long the axis is.
+
+    A task per 24h chunk instead (~28k per variable over the real 1950-..
+    axis) costs GBs of graph and OOMs the init job; the store's chunking is
+    declared in init_store's `encoding` instead. See build_template.
+    """
+    ref = make_clipped_ds(month_index(1950, 1, ndays=2), ["t2m", "tp"])
+    template = build_template(global_axis(default_axis_end()), ref)
+
+    assert template["t2m"].chunks == ((len(template.time),), (2,), (2,))
+    assert len(template["t2m"].data.dask) == 1

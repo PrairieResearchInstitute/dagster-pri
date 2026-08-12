@@ -29,8 +29,6 @@ Run
   uv run --with matplotlib scripts/verify-era5-illinois.py verify
 
   # options
-  uv run --with matplotlib scripts/verify-era5-illinois.py verify \
-      --var t2m --out-dir scratch/era5_check
 
   # Just the real-data date range (start/end of populated timesteps). Assumes all
   # variables share the same populated range, so it inspects a single --var:

@@ -18,6 +18,8 @@ from __future__ import annotations
 import calendar
 from typing import TYPE_CHECKING, NamedTuple
 
+from dagster_pri.era5.accumulation import hourly_increment
+
 if TYPE_CHECKING:
     import pandas as pd
     import xarray as xr
@@ -130,12 +132,10 @@ def daily_summary_local(pts: xr.Dataset, year: int, month: int, tz: str = DEFAUL
     -------------
     ERA5-Land ``tp`` is an accumulation since 00 UTC that **resets at 00 UTC**, so
     a naive resample/sum is wrong, and the UTC-only "value at 00:00 of D+1" trick
-    does not align to Central days. Instead we de-accumulate to per-hour
-    increments and sum those by local day, which is day-definition agnostic:
-
-      * hour 02..23 and 00: increment = tp[t] - tp[t-1]
-      * hour 01: increment = tp[t] itself (the first hour after the 00 UTC reset;
-        the previous sample is the prior day's full total, so a raw diff is wrong)
+    does not align to Central days. Instead we de-accumulate to per-hour increments
+    (:func:`dagster_pri.era5.accumulation.hourly_increment`) and sum those by local
+    day, which is day-definition agnostic. This is the same kernel the ingest uses
+    to derive the store's ``tp_hourly`` array.
     """
     import numpy as np
     import pandas as pd
@@ -158,9 +158,7 @@ def daily_summary_local(pts: xr.Dataset, year: int, month: int, tz: str = DEFAUL
     )
 
     # Precipitation: de-accumulate to hourly increments, then sum by local day.
-    tp = pts[V_TP]
-    inc = tp - tp.shift(time=1)
-    inc = xr.where(tp["time"].dt.hour == 1, tp, inc)
+    inc = hourly_increment(pts[V_TP])
     # skipna=False so a station whose nearest cell is all-NaN (outside the clip)
     # yields NaN (dropped downstream) rather than a misleading 0.
     out["precip_total_mm"] = inc.groupby("local_day").sum(skipna=False) * 1000.0
