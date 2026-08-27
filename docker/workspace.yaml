@@ -1,0 +1,6 @@
+# Code location loaded by the webserver and the daemon. Both spawn their own code
+# server subprocess for this module.
+load_from:
+  - python_module:
+      module_name: dagster_pri.definitions
+      working_directory: /app

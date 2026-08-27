@@ -10,7 +10,7 @@ import dagster as dg
 import numpy as np
 import pytest
 import xarray as xr
-from era5_helpers import month_index
+from era5_helpers import month_index, strip_cds_variables_attr
 
 from dagster_pri.defs.era5_ingest import Era5IngestConfig, era5_iceberg
 from dagster_pri.defs.era5_init import Era5InitConfig, era5_init
@@ -102,12 +102,11 @@ def _init_config(work_dir: Path) -> Era5InitConfig:
 
 
 def _ingest_config(year: int, month: int, work_dir: Path) -> Era5IngestConfig:
+    """No variable lists: the ingest reads both off the store `era5_init` created."""
     return Era5IngestConfig(
         state="IL",
         year=year,
         month=month,
-        variables=VARS,
-        accumulated_variables=ACCUM,
         ndays=2,
         work_dir=str(work_dir),
     )
@@ -204,6 +203,38 @@ def test_ingest_splits_variables_across_cds_requests(resources, tmp_path, local_
         assert var in ds.data_vars
     assert np.all(ds["2m_temperature"].sel(time="1950-02-01T00:00").values == 2.0)
     assert np.all(ds["total_precipitation"].sel(time="1950-02-01T00:00").values == 2.0)
+
+
+def test_ingest_of_a_store_with_no_recorded_variable_list(resources, tmp_path, local_clip_mask):
+    """A pre-attr store is not guessed at -- but `variables` still overrides."""
+    work = tmp_path / "work"
+    assert era5_init.execute_in_process(
+        run_config=dg.RunConfig(ops={"init_state_store": _init_config(work)}), resources=resources
+    ).success
+    strip_cds_variables_attr(resources["icechunk"].open_repo(repo_prefix("IL")))
+
+    result = dg.materialize(
+        [era5_iceberg],
+        run_config=dg.RunConfig(ops={"era5_iceberg": _ingest_config(1950, 2, work)}),
+        resources=resources,
+        raise_on_error=False,
+    )
+    assert not result.success
+    assert "does not record the CDS variable list" in (
+        result.failure_data_for_node("era5_iceberg").error.message
+    )
+
+    override = _ingest_config(1950, 2, work).model_copy(update={"variables": VARS})
+    result = dg.materialize(
+        [era5_iceberg],
+        run_config=dg.RunConfig(ops={"era5_iceberg": override}),
+        resources=resources,
+    )
+    assert result.success
+    meta = result.asset_materializations_for_node("era5_iceberg")[0].metadata
+    assert meta["variables"].value == VARS
+    # The de-accumulation set never needed the attribute: it is the `_hourly` arrays.
+    assert meta["accumulated_variables"].value == ACCUM
 
 
 def test_ingest_without_init_fails_clearly(resources, tmp_path, local_clip_mask):

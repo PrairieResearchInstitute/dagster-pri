@@ -1,0 +1,51 @@
+# Dagster instance config baked into the production image.
+#
+# The entrypoint copies this to $DAGSTER_HOME/dagster.yaml only if no dagster.yaml
+# is already there, so a deployment can mount its own file over $DAGSTER_HOME and
+# override everything below.
+#
+# Every value comes from the environment; the image ships defaults for all of them
+# except DAGSTER_PG_PASSWORD, which the deployment must supply.
+
+storage:
+  postgres:
+    postgres_db:
+      hostname:
+        env: DAGSTER_PG_HOST
+      port:
+        env: DAGSTER_PG_PORT
+      db_name:
+        env: DAGSTER_PG_DB
+      username:
+        env: DAGSTER_PG_USERNAME
+      password:
+        env: DAGSTER_PG_PASSWORD
+
+# Runs are queued by the daemon and executed as subprocesses inside this container.
+# ERA5 ingest stages whole months of NetCDF, so keep concurrency low by default.
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    max_concurrent_runs:
+      env: DAGSTER_MAX_CONCURRENT_RUNS
+
+run_launcher:
+  module: dagster.core.launcher
+  class: DefaultRunLauncher
+
+# Mount a volume at /opt/dagster/local to keep step logs across restarts.
+local_artifact_storage:
+  module: dagster.core.storage.root
+  class: LocalArtifactStorage
+  config:
+    base_dir: /opt/dagster/local
+
+compute_logs:
+  module: dagster._core.storage.local_compute_log_manager
+  class: LocalComputeLogManager
+  config:
+    base_dir: /opt/dagster/local/compute_logs
+
+telemetry:
+  enabled: false

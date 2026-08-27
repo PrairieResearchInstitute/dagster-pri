@@ -10,9 +10,10 @@ schema bootstrap with a different lifecycle than the repeated per-month ingest.
 
 The variable set includes the derived ``<short>_hourly`` arrays for every entry in
 ``accumulated_variables``, which defaults to every accumulated variable in the
-default download (see :mod:`dagster_pri.era5.accumulation`). Because the set is
-fixed at array creation, the same list must be configured for the ``era5_iceberg``
-ingest.
+default download (see :mod:`dagster_pri.era5.accumulation`). Both lists are fixed
+here for the life of the store: ``variables`` is recorded in the store's root
+attributes and the accumulated set is implied by the ``_hourly`` arrays, so the
+``era5_iceberg`` ingest reads them back rather than being configured to match.
 """
 
 import tempfile
@@ -50,7 +51,7 @@ class Era5InitConfig(dg.Config):
     # Accumulations since 00 UTC; each gets an extra "<short>_hourly" array baked
     # into the store's variable set. Defaults to every accumulated variable in the
     # default download; pass [] to skip de-accumulation. Narrowing `variables` means
-    # narrowing this to match. Every later ingest must use the same list.
+    # narrowing this to match. Later ingests read this set back off the store.
     accumulated_variables: list[str] = DEFAULT_ACCUMULATED_VARIABLES
     # Variables per CDS request; the reference month is fetched as
     # ceil(len(variables) / this) downloads and merged after clipping. Lower it
@@ -113,7 +114,7 @@ def init_state_store(
     ref_clipped = add_hourly_increments(ref_clipped, config.accumulated_variables)
 
     repo = icechunk.open_or_create_repo(prefix)
-    init_store(repo, times, ref_clipped, config.time_chunk)
+    init_store(repo, times, ref_clipped, config.time_chunk, config.variables)
 
     context.log.info(
         "region-writing reference month %04d-%02d...", config.ref_year, config.ref_month

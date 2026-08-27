@@ -121,8 +121,12 @@ UTC day, so any negative is differencing noise.
 
 `accumulated_variables` defaults to exactly that set and can be narrowed (`[]`
 disables de-accumulation entirely) to trade derived arrays for store size. Because
-the derived arrays are part of the variable set, it must be identical for init and
-every ingest, exactly like `variables`.
+the derived arrays are part of the variable set, it is fixed at init for the life
+of the store — so it is config on `init` only, and the ingest reads it back off
+the store's `_hourly` arrays instead of being configured to match. `variables` is
+fixed the same way, but cannot be recovered from the store's (CF short) array
+names, so init records the CDS request list in the root attribute
+`era5_cds_variables` for the ingest to reuse.
 
 ### 3. Explicit `init` subcommand instead of auto-probe
 The current script auto-decides create-vs-append by probing. Under parallel

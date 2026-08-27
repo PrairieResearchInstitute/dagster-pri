@@ -49,6 +49,23 @@ def make_clipped_ds(
     return ds
 
 
+def strip_cds_variables_attr(repo) -> None:
+    """Drop the recorded CDS variable list, standing in for a pre-attr store.
+
+    Stores initialized before :data:`dagster_pri.era5.store.CDS_VARIABLES_ATTR`
+    existed have the arrays but not the attribute; this reproduces that shape
+    without keeping an old store fixture around.
+    """
+    import zarr
+
+    from dagster_pri.era5.store import CDS_VARIABLES_ATTR
+
+    session = repo.writable_session("main")
+    group = zarr.open_group(session.store, mode="r+")
+    del group.attrs[CDS_VARIABLES_ATTR]
+    session.commit("test: drop the recorded CDS variable list")
+
+
 def write_raw_era5_nc(
     target: Path,
     year: int,

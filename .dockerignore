@@ -16,8 +16,18 @@ venv/
 # Local / scratch
 scratch/
 plans/
+notebooks/
 .env
 *.log
+.tmp_dagster_home_*/
+
+# Dev-only tooling and CI (not needed at runtime)
+tests/
+scripts/
+.github/
+.pre-commit-config.yaml
+.dg/
+.claude/
 
 # Editor / OS
 .vscode/

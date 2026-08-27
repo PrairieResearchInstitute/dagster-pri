@@ -141,6 +141,89 @@ initialized via the `era5_init` job. Configure it with these `.env` vars:
 | `ERA5_END_YM`   | no       | Last month, inclusive, `YYYY-MM`. Unbounded if unset.|
 | `ERA5_STATE`    | no       | USPS state code; defaults to `IL`.                   |
 
+## Production deployment
+
+The repo builds a single, self-contained image that runs the Dagster webserver
+**and** the daemon (the daemon is required — without it `era5_monthly_sensor`
+never ticks and queued runs never launch):
+
+```
+ghcr.io/prairieresearchinstitute/dagster-pri:<version>
+```
+
+It is published for `linux/amd64` and `linux/arm64` by
+`.github/workflows/release-image.yml` whenever a GitHub Release is published;
+tags are `X.Y.Z`, `X.Y`, and `latest` (plus `sha-<sha>` for manual
+`workflow_dispatch` runs). The image sources live in `docker/`.
+
+### Roles
+
+The container command selects what runs. `all` is the default:
+
+| Command     | Runs                                                              |
+| ----------- | ----------------------------------------------------------------- |
+| `all`       | daemon + webserver in one container; exits if either process dies |
+| `webserver` | webserver only                                                    |
+| `daemon`    | daemon only                                                       |
+| `grpc`      | serves this code location over gRPC to an external Dagster        |
+| *other*     | run verbatim (e.g. `bash`, `dagster asset materialize ...`)        |
+
+### Configuration
+
+Storage is Postgres — the image assumes a server already exists. Baked
+`dagster.yaml` (`docker/dagster.yaml`) reads:
+
+| Variable                     | Default    | Notes                            |
+| ---------------------------- | ---------- | -------------------------------- |
+| `DAGSTER_PG_HOST`            | `postgres` |                                  |
+| `DAGSTER_PG_PORT`            | `5432`     |                                  |
+| `DAGSTER_PG_DB`              | `dagster`  |                                  |
+| `DAGSTER_PG_USERNAME`        | `dagster`  |                                  |
+| `DAGSTER_PG_PASSWORD`        | —          | **required**                     |
+| `DAGSTER_MAX_CONCURRENT_RUNS`| `2`        | ERA5 runs are memory-hungry      |
+| `DAGSTER_WEBSERVER_PORT`     | `3000`     |                                  |
+
+The application env vars are the same ones `.env` holds locally —
+`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`BUCKET_NAME`, `CDSAPI_URL`, `CDSAPI_KEY`, plus the `ERA5_*` sensor vars. The
+resources do **not** load `.env` themselves, so these must be real process
+environment (or Docker/Kubernetes secrets).
+
+To override the instance config entirely, mount your own `dagster.yaml` at
+`$DAGSTER_HOME` (`/opt/dagster/home`) — the entrypoint only installs the baked
+one when none is present.
+
+### Volumes
+
+| Path                 | Why                                                        |
+| -------------------- | ---------------------------------------------------------- |
+| `/opt/dagster/local` | compute (step) logs and artifact storage; lost on restart otherwise |
+| `TMPDIR` (`/tmp`)    | ERA5 ingest stages whole months of NetCDF here — size it generously |
+
+### Example
+
+```yaml
+services:
+  dagster:
+    image: ghcr.io/prairieresearchinstitute/dagster-pri:latest
+    ports: ["3000:3000"]
+    env_file: .env
+    environment:
+      DAGSTER_PG_HOST: postgres
+      DAGSTER_PG_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - dagster-local:/opt/dagster/local
+      - era5-tmp:/tmp
+    depends_on: [postgres]
+
+volumes:
+  dagster-local:
+  era5-tmp:
+```
+
+After first start, run the `era5_init` job for the state, then enable
+`era5_monthly_sensor` in the UI (it ships `STOPPED`).
+
 ## Learn more
 
 - [Dagster Documentation](https://docs.dagster.io/)

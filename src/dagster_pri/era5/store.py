@@ -4,12 +4,22 @@ Storage construction lives in the Dagster resource
 (:class:`dagster_pri.defs.resources.IcechunkStorageResource`); these helpers take
 an already-built ``icechunk.Storage`` (or an open ``Repository``) so they stay
 testable against in-memory / local-filesystem storage.
+
+A store's variable set is fixed when its arrays are created, so the store -- not
+the run config -- is the authority on what every later month must contain. It
+carries that contract itself: the CDS variable list is recorded in a root
+attribute at init, and the de-accumulated variables are visible as the ``_hourly``
+arrays. :func:`read_store_variables` reads both back (see
+:mod:`dagster_pri.defs.era5_ingest`).
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from typing import NamedTuple
 
+from dagster_pri.era5.accumulation import HOURLY_SUFFIX
 from dagster_pri.era5.axis import (
     assert_subset_of_axis,
     axis_initialized,
@@ -18,6 +28,13 @@ from dagster_pri.era5.axis import (
 )
 
 log = logging.getLogger("era5land")
+
+# Root attribute holding the JSON-encoded CDS variable list the store was
+# initialized with. The store's own array names are CF short names (t2m, tp) and
+# nothing maps those back to the CDS long names a retrieval needs, so init has to
+# write the request list down for later ingests to reuse. JSON-encoded rather than
+# a bare list attr so what comes back out of Zarr is unambiguously a list of str.
+CDS_VARIABLES_ATTR = "era5_cds_variables"
 
 
 # --------------------------------------------------------------------------- #
@@ -75,11 +92,16 @@ def commit_with_retry(session, message: str, attempts: int = 5):
     raise RuntimeError(f"commit failed after {attempts} rebase attempts: {message} ({last})")
 
 
-def init_store(repo, times, ref_clipped, time_chunk: int) -> bool:
+def init_store(repo, times, ref_clipped, time_chunk: int, cds_variables: list[str]) -> bool:
     """Lay down the full-axis template (compute=False) as one commit.
 
     Idempotent: a no-op if the axis already exists. Returns True if it wrote the
     template, False if it was already initialized.
+
+    ``cds_variables`` is the CDS request list this template was built from; it is
+    recorded in the store's root attributes so later ingests can reuse it instead
+    of being configured with a matching list by hand (see
+    :data:`CDS_VARIABLES_ATTR`).
 
     Refuses to re-template a store that already holds a DIFFERENT variable set:
     the write below is ``mode="w"``, so proceeding would drop the existing arrays
@@ -119,6 +141,7 @@ def init_store(repo, times, ref_clipped, time_chunk: int) -> bool:
     )
     session = repo.writable_session("main")
     template = build_template(times, ref_clipped)
+    template.attrs[CDS_VARIABLES_ATTR] = json.dumps(list(cds_variables))
     # zstd compression + NaN fill, fixed once at array-creation; region/append
     # writes inherit it and must not (and do not) re-specify encoding.
     compressors = [BloscCodec(cname="zstd", clevel=5, shuffle=BloscShuffle.shuffle)]
@@ -178,6 +201,34 @@ def write_month(repo, clipped, year: int, month: int) -> str:
     snap = commit_with_retry(session, f"ingest {year}-{month:02d} via {mode}")
     log.info("  committed %04d-%02d (%s) -> snapshot %s", year, month, mode, snap)
     return mode
+
+
+class StoreVariables(NamedTuple):
+    """The variable contract a store fixed when its arrays were created.
+
+    ``cds``: the CDS long names to request per month, as recorded by ``init``, or
+    ``None`` for a store initialized before that list was written down.
+    ``accumulated``: the *stored* names carrying a derived ``_hourly`` array, ready
+    to pass to :func:`dagster_pri.era5.accumulation.add_hourly_increments`.
+    """
+
+    cds: list[str] | None
+    accumulated: list[str]
+
+
+def read_store_variables(repo) -> StoreVariables:
+    """Read a store's variable contract back off the store itself.
+
+    Lets an ingest derive both lists rather than be configured with lists that
+    have to match what ``init`` used -- a mismatch would otherwise only surface in
+    :func:`validate_variables_against_store`, i.e. after paying CDS for the month.
+    """
+    ds = open_store_dataset(repo)
+    raw = ds.attrs.get(CDS_VARIABLES_ATTR)
+    accumulated = sorted(
+        name.removesuffix(HOURLY_SUFFIX) for name in ds.data_vars if name.endswith(HOURLY_SUFFIX)
+    )
+    return StoreVariables(cds=json.loads(raw) if raw else None, accumulated=accumulated)
 
 
 def validate_variables_against_store(repo, clipped) -> None:

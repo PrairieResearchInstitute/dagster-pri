@@ -776,6 +776,7 @@ dependencies = [
     { name = "cdsapi" },
     { name = "dagster" },
     { name = "dagster-postgres" },
+    { name = "dagster-webserver" },
     { name = "dask" },
     { name = "geopandas" },
     { name = "icechunk" },
@@ -795,7 +796,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "dagster-dg-cli" },
-    { name = "dagster-webserver" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
@@ -807,6 +807,7 @@ requires-dist = [
     { name = "cdsapi", specifier = ">=0.7.4" },
     { name = "dagster", specifier = "==1.13.11" },
     { name = "dagster-postgres", specifier = "==0.29.11" },
+    { name = "dagster-webserver", specifier = "==1.13.11" },
     { name = "dask" },
     { name = "geopandas", specifier = ">=0.14" },
     { name = "icechunk", specifier = ">=2.0" },
@@ -826,7 +827,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "dagster-dg-cli" },
-    { name = "dagster-webserver" },
     { name = "pre-commit", specifier = ">=4.6.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.20" },

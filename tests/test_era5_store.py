@@ -2,12 +2,13 @@
 
 import numpy as np
 import pytest
-from era5_helpers import make_clipped_ds, month_index
+from era5_helpers import make_clipped_ds, month_index, strip_cds_variables_attr
 
 from dagster_pri.era5.axis import global_axis
 from dagster_pri.era5.store import (
     init_store,
     open_store_dataset,
+    read_store_variables,
     validate_variables_against_store,
     write_month,
 )
@@ -15,11 +16,11 @@ from dagster_pri.era5.store import (
 VARS = ["2m_temperature", "total_precipitation"]
 
 
-def _init_jan_through(repo, axis_end: str, *, ref_ndays=2):
+def _init_jan_through(repo, axis_end: str, *, ref_ndays=2, variables=VARS):
     """Init the axis [1950-01-01, axis_end] from a Jan reference month."""
     times = global_axis(axis_end)
-    ref = make_clipped_ds(month_index(1950, 1, ndays=ref_ndays), VARS, fill=1.0)
-    wrote = init_store(repo, times, ref, time_chunk=24)
+    ref = make_clipped_ds(month_index(1950, 1, ndays=ref_ndays), variables, fill=1.0)
+    wrote = init_store(repo, times, ref, time_chunk=24, cds_variables=variables)
     return times, wrote
 
 
@@ -40,6 +41,7 @@ def test_init_store_lays_axis_and_is_idempotent(in_memory_repo):
             times,
             make_clipped_ds(month_index(1950, 1, ndays=2), VARS),
             time_chunk=24,
+            cds_variables=VARS,
         )
         is False
     )
@@ -53,12 +55,37 @@ def test_init_store_refuses_to_retemplate_a_different_variable_set(in_memory_rep
 
     grown = make_clipped_ds(month_index(1950, 1, ndays=2), [*VARS, "total_precipitation_hourly"])
     with pytest.raises(ValueError, match="already holds variables"):
-        init_store(in_memory_repo, times, grown, time_chunk=24)
+        init_store(in_memory_repo, times, grown, time_chunk=24, cds_variables=VARS)
 
     # The refusal left the store intact.
     ds = open_store_dataset(in_memory_repo)
     assert set(ds.data_vars) == set(VARS)
     assert np.all(ds["2m_temperature"].sel(time="1950-01-01T00:00").values == 1.0)
+
+
+def test_read_store_variables_round_trips_the_cds_request_list(in_memory_repo):
+    """Init records the CDS names; the store's own arrays only carry short names."""
+    _init_jan_through(in_memory_repo, "1950-01-31T23:00")
+    assert read_store_variables(in_memory_repo).cds == VARS
+
+
+def test_read_store_variables_derives_accumulated_from_the_hourly_arrays(in_memory_repo):
+    times = global_axis("1950-01-31T23:00")
+    ref = make_clipped_ds(month_index(1950, 1, ndays=2), [*VARS, "total_precipitation_hourly"])
+    init_store(in_memory_repo, times, ref, time_chunk=24, cds_variables=VARS)
+
+    store_vars = read_store_variables(in_memory_repo)
+    # The derived array is not something CDS serves, so it stays out of the request
+    # list -- but it is exactly what says "total_precipitation was de-accumulated".
+    assert store_vars.cds == VARS
+    assert store_vars.accumulated == ["total_precipitation"]
+
+
+def test_read_store_variables_reports_no_cds_list_when_unrecorded(in_memory_repo):
+    """A store initialized before the attr existed reports None, never a guess."""
+    _init_jan_through(in_memory_repo, "1950-01-31T23:00")
+    strip_cds_variables_attr(in_memory_repo)
+    assert read_store_variables(in_memory_repo).cds is None
 
 
 def test_write_month_region_out_of_order(in_memory_repo):
