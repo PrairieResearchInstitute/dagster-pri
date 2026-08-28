@@ -100,26 +100,107 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # The release tag IS the image tag, verbatim. Release tags here are not
+          # always strict semver (`0.1-alpha.1` has no patch component), and
+          # type=semver emits nothing at all for a ref it cannot parse -- which
+          # left `imagetools create` with no -t and failed the whole publish. The
+          # semver patterns stay as extra aliases for when the tag does parse.
           tags: |
+            type=raw,value=${{ github.event.release.tag_name || 'unused' }},enable=${{ github.event_name == 'release' }},priority=1000
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=sha,enable=${{ github.event_name == 'workflow_dispatch' }}
 
+      # Everything below refers to the image by this tag rather than by
+      # steps.meta.outputs.version, so a tag that is not semver still resolves.
+      - name: Resolve the primary tag
+        id: primary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          ref=$(head -n1 <<< "$TAGS")
+          if [ -z "$ref" ]; then
+            echo "::error::no image tags computed for ${{ github.ref }} -- refusing to push an untagged manifest"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+          set -euo pipefail
+          # Built as arrays rather than by word-splitting: an unquoted $TAGS is at
+          # the mercy of IFS, and a silently empty expansion is what produced
+          # "can't push with no tags specified" in the first place.
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(-t "$tag")
+          done <<< "$TAGS"
+          if [ ${#args[@]} -eq 0 ]; then
+            echo "::error::no image tags computed for ${{ github.ref }}"
+            exit 1
+          fi
+          for digest in *; do
+            args+=("${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${args[@]}"
 
       - name: Inspect manifest
         run: |
-          docker buildx imagetools inspect \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect ${{ steps.primary.outputs.ref }}
 
       - name: Smoke test the published image
+        env:
+          REF: ${{ steps.primary.outputs.ref }}
         run: |
-          docker run --rm \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} \
+          set -euo pipefail
+
+          # The verbatim command form skips the preflight, so this still works
+          # with no Postgres and no credentials.
+          docker run --rm "$REF" \
             python -c "from dagster_pri.definitions import defs; print('definitions load OK')"
+
+          # Contract regression tests -- see docs/deploy.md. Each of these used to
+          # produce a container that started and reported healthy, and failed only
+          # once a run was launched.
+
+          # 1. An external run launcher must be rejected at startup, not lazily.
+          cat > /tmp/docker-launcher.yaml <<'YAML'
+          storage:
+            postgres:
+              postgres_db:
+                hostname: postgres
+                port: 5432
+                db_name: dagster
+                username: dagster
+                password: unused
+          run_launcher:
+            module: dagster_docker
+            class: DockerRunLauncher
+          YAML
+          if docker run --rm -v /tmp/docker-launcher.yaml:/opt/dagster/home/dagster.yaml:ro \
+               "$REF" webserver 2>&1 | tee /tmp/out1; then
+            echo "::error::webserver started with an unimportable run launcher"
+            exit 1
+          fi
+          grep -q "NOT supported" /tmp/out1
+
+          # 2. The S3_* names the image does not read must be rejected when the
+          #    AWS_* name it does read is absent.
+          if docker run --rm -e DAGSTER_PG_PASSWORD=x \
+               -e S3_ENDPOINT=http://x -e S3_ACCESS_KEY=a -e S3_SECRET_KEY=b \
+               "$REF" daemon 2>&1 | tee /tmp/out2; then
+            echo "::error::daemon started with S3_* instead of AWS_*"
+            exit 1
+          fi
+          grep -q "This image reads AWS_ENDPOINT_URL" /tmp/out2
+
+          # 3. TMPDIR is the staging knob and must resolve to the image's scratch dir.
+          test "$(docker run --rm "$REF" python -c 'import tempfile;print(tempfile.gettempdir())')" \
+             = "/opt/dagster/scratch"
+
+          echo "deployment contract smoke tests OK"

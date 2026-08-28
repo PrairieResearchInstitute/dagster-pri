@@ -24,6 +24,7 @@ notebooks/
 # Dev-only tooling and CI (not needed at runtime)
 tests/
 scripts/
+docs/
 .github/
 .pre-commit-config.yaml
 .dg/
