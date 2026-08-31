@@ -73,7 +73,8 @@ Required in every process that **loads the code** — see
 
 | Variable | Required | Secret | Default | What it does |
 | -------- | -------- | ------ | ------- | ------------ |
-| `BUCKET_NAME` | **yes** | no | — | Bucket holding the Icechunk stores, the parquet outputs, the clip masks and the stations CSV. |
+| `BUCKET_NAME` | **yes** | no | — | Public bucket: the Icechunk stores, the clip masks and the hourly station parquet. |
+| `PRIVATE_BUCKET_NAME` | **yes** | no | — | Private bucket: the stations CSV and the daily station parquet. Same endpoint and same credentials as `BUCKET_NAME` — only the bucket name differs. |
 | `AWS_ENDPOINT_URL` | **yes** | no | — | S3 endpoint, e.g. `https://ceph-rgw.example.edu`. The scheme selects TLS: `https://` enables it, `http://` sets `allow_http`. |
 | `AWS_ACCESS_KEY_ID` | **yes** | **yes** | — | S3 access key. |
 | `AWS_SECRET_ACCESS_KEY` | **yes** | **yes** | — | S3 secret key. |
@@ -369,20 +370,33 @@ The container does **not** require Postgres to be up at start: the preflight
 does no database I/O deliberately, so a container can come up before the
 cluster and let Dagster's own retry handle it.
 
-### 6.2 Bucket
+### 6.2 Buckets
 
-`BUCKET_NAME` must exist. The layout is fixed by the code, not configurable:
+Both `BUCKET_NAME` and `PRIVATE_BUCKET_NAME` must exist. They share one endpoint
+and one credential pair; only the name differs. The layout is fixed by the code,
+not configurable.
+
+`BUCKET_NAME` — public:
 
 | Prefix | Written by | Purpose |
 | ------ | ---------- | ------- |
 | `shapefiles/state-watershed/<ST>/<st>_huc8_clip_mask.parquet` | **you, before first run** | HUC8 clip mask per state. |
-| `pri_data/stations.csv` | **you, before first run** | Station list read by the station assets. Overridable per-op via the `stations_key` config. |
 | `era5-land/icechunk/<ST>/` | `era5_init`, `era5_iceberg` | Icechunk store of raw ERA5-Land. |
-| `era5-land/parquet/STATE=…/YEAR=…/MONTH=…/` | `daily_station_readings` | Daily station parquet. Also what the sensor reads to decide the next month. |
 | `era5-land/hourly/STATE=…/YEAR=…/MONTH=…/` | `hourly_station_readings` | Hourly station parquet. |
 
-The first two are **deployment prerequisites**. Without the clip mask every run
-fails with:
+`PRIVATE_BUCKET_NAME` — private; the station list and everything derived from it:
+
+| Prefix | Written by | Purpose |
+| ------ | ---------- | ------- |
+| `pri_data/stations.csv` | **you, before first run** | Station list read by `daily_station_readings`. Overridable per-op via the `stations_key` config. |
+| `era5-land/parquet/STATE=…/YEAR=…/MONTH=…/` | `daily_station_readings` | Daily station parquet. Also what `era5_monthly_sensor` reads to decide the next month, so the sensor stalls if this bucket is wrong. |
+
+> `hourly_station_readings` is the exception: it still reads `pri_data/stations.csv`
+> from `BUCKET_NAME` and writes its parquet there. If you run that asset, the CSV
+> has to exist in the public bucket too.
+
+The clip mask and the stations CSV are **deployment prerequisites**. Without the
+clip mask every run fails with:
 
 ```
 ValueError: No clip mask for IL at '<bucket>/shapefiles/state-watershed/IL/il_huc8_clip_mask.parquet'.
@@ -396,7 +410,7 @@ deployer configuration is involved.
 
 ### 6.3 First run
 
-1. Upload the clip mask and `stations.csv`.
+1. Upload the clip mask to `BUCKET_NAME` and `stations.csv` to `PRIVATE_BUCKET_NAME`.
 2. Start the stack; confirm the code location loads.
 3. Run the `era5_init` job once per state.
 4. Start `era5_monthly_sensor` (it ships `STOPPED`).
@@ -470,6 +484,7 @@ services:
       DAGSTER_MAX_CONCURRENT_RUNS: "2"
 
       BUCKET_NAME: ${BUCKET_NAME:?missing}
+      PRIVATE_BUCKET_NAME: ${PRIVATE_BUCKET_NAME:?missing}
       AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:?missing}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?missing}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?missing}

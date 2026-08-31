@@ -62,7 +62,11 @@ Run
   uv run scripts/era5-stations.py --year 2000 --month 1 --report ./data.parquet
   uv run scripts/era5-stations.py --year 2000 --month 1 --no-plots
 
-S3/Ceph connection is read from .env exactly like the writer/verifier scripts.
+S3/Ceph connection is read from .env exactly like the writer/verifier scripts. Two
+buckets are involved and they are not interchangeable: the Icechunk store lives in
+``BUCKET_NAME`` (public), while the report parquet under test lives in
+``PRIVATE_BUCKET_NAME`` -- ``daily_station_readings`` writes it there alongside the
+stations CSV. ``--report`` overrides the latter with any local path or bucket/key.
 """
 
 from __future__ import annotations
@@ -1041,7 +1045,8 @@ def main() -> int:
     p.add_argument(
         "--report",
         default=None,
-        help="Report parquet: a local path or bucket/key (default: the asset's output path).",
+        help="Report parquet: a local path or bucket/key (default: the asset's "
+        "output path in PRIVATE_BUCKET_NAME).",
     )
     p.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Directory for the CSV and PNGs.")
     p.add_argument("--tz", default=DEFAULT_TZ, help="Local day definition.")
@@ -1064,7 +1069,7 @@ def main() -> int:
     state = args.state.strip().upper()
     prefix = args.prefix or ZARR_PREFIX_TEMPLATE.format(state=state)
     report_path = args.report or (
-        f"{os.environ['BUCKET_NAME']}/"
+        f"{os.environ['PRIVATE_BUCKET_NAME']}/"
         + REPORT_KEY_TEMPLATE.format(state=state, year=args.year, month=args.month)
     )
     outdir = Path(args.outdir)

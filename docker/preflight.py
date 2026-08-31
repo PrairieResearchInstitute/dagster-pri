@@ -31,7 +31,13 @@ from pathlib import Path
 # The variables the code actually reads. Keep in step with
 # src/dagster_pri/defs/resources.py and defs/era5_automation.py, and with the
 # table in docs/deploy.md.
-S3_VARS = ("AWS_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "BUCKET_NAME")
+S3_VARS = (
+    "AWS_ENDPOINT_URL",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "BUCKET_NAME",
+    "PRIVATE_BUCKET_NAME",
+)
 CDS_VARS = ("CDSAPI_URL", "CDSAPI_KEY")
 
 # Names a deployer plausibly supplies instead, none of which anything here reads.

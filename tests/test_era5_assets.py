@@ -79,6 +79,7 @@ def resources(tmp_path, bucket_root):
         "icechunk": LocalIcechunkStorageResource(
             base_dir=str(tmp_path / "store"),
             bucket=str(bucket_root),
+            private_bucket=str(bucket_root),
             endpoint_url="http://test",
             access_key_id="x",
             secret_access_key="y",

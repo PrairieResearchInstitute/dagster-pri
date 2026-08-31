@@ -2,8 +2,13 @@
 
 Reads the per-state ERA5-Land Icechunk store (written by ``era5_iceberg``) for one
 month, looks up each station's nearest grid cell, aggregates to **local
-Central-time days**, and writes a single parquet file to the object store at
+Central-time days**, and writes a single parquet file to the **private** bucket at
 ``era5-land/parquet/STATE=<state>/YEAR=<year>/MONTH=<month>/data.parquet``.
+
+Both ends of this asset are private: the stations CSV it reads and the parquet it
+writes live in ``PRIVATE_BUCKET_NAME``, not the public bucket that holds the
+Icechunk stores and the clip masks. ``era5_monthly_sensor`` reads the same private
+parquet to decide the next month.
 
 No CDS download: this is a read-only summary over already-ingested data. The store
 must already hold the requested month (run ``era5_init`` + ``era5_iceberg`` first).
@@ -47,7 +52,7 @@ class DailyStationReadingsConfig(dg.Config):
     state: str = "IL"  # USPS code, e.g. "IL"
     year: int = 2024
     month: int = 1  # 1-12
-    stations_key: str = "pri_data/stations.csv"  # object-store key, under the bucket
+    stations_key: str = "pri_data/stations.csv"  # key under the private bucket
     tz: str = "America/Chicago"  # local day definition
     workers: int = 32  # dask threads for parallel, I/O-bound S3 reads
 
@@ -55,7 +60,7 @@ class DailyStationReadingsConfig(dg.Config):
 @dg.asset(
     deps=["era5_iceberg"],  # reads what the ingest wrote; orders ingest-then-stations in a job
     description="Per-station daily ERA5-Land summaries (local Central-time day) for "
-    "one state/month, written as a parquet file to the object store.",
+    "one state/month, written as a parquet file to the private bucket.",
     kinds={"parquet"},
 )
 def daily_station_readings(
@@ -102,7 +107,7 @@ def daily_station_readings(
     df = to_dataframe(daily, stations)
 
     out_key = (
-        f"{icechunk.bucket}/era5-land/parquet/"
+        f"{icechunk.private_bucket}/era5-land/parquet/"
         f"STATE={state}/YEAR={config.year}/MONTH={config.month:02d}/data.parquet"
     )
     with fs.open(out_key, "wb") as f:

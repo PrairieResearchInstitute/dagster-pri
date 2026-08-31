@@ -6,16 +6,18 @@ summarize chain for a new month. To rebuild only the daily station parquet for a
 month already in the store, use ``daily_station_readings_job``
 (:mod:`dagster_pri.defs.era5_stations`) instead; it skips the CDS download. A sensor
 (``era5_monthly_sensor``) walks a state forward one month at a time: each tick it
-queries the **landed parquet output** in the object store to find the latest month
+queries the **landed parquet output** in the private bucket to find the latest month
 already produced, then requests a run for the next month -- bounded by a configured
 start month and an optional end month.
 
 Detecting "the last successful month" reads the parquet output, not Icechunk:
 ``daily_station_readings`` runs strictly after (and depends on) ``era5_iceberg``
 and writes its parquet only on success, so the presence of a month's parquet
-partition implies the whole chain succeeded for that month. The parquet dataset is
-inspected with the parquet / s3fs / pyarrow stack; Icechunk holds only the raw
-ERA5-Land data.
+partition implies the whole chain succeeded for that month. That parquet lives in
+``PRIVATE_BUCKET_NAME`` (see :mod:`dagster_pri.defs.era5_stations`), so the sensor
+reads the private bucket while the ingest reads/writes the public one. The parquet
+dataset is inspected with the parquet / s3fs / pyarrow stack; Icechunk holds only
+the raw ERA5-Land data.
 
 Configuration (environment variables, loaded from ``.env`` by ``dg dev`` / ``dg
 launch``):
@@ -100,9 +102,10 @@ def landed_months(fs, bucket: str, state: str) -> set[YearMonth]:
 
     Queries the hive-partitioned parquet dataset under
     ``{bucket}/era5-land/parquet/STATE={state}`` with pyarrow over the given s3fs
-    filesystem. pyarrow only discovers partitions that actually contain parquet
-    files, so partial/empty directories are excluded. Returns an empty set if the
-    state's prefix does not exist yet.
+    filesystem. ``bucket`` is the **private** bucket -- that is where
+    ``daily_station_readings`` writes. pyarrow only discovers partitions that
+    actually contain parquet files, so partial/empty directories are excluded.
+    Returns an empty set if the state's prefix does not exist yet.
     """
     import pyarrow.dataset as pads
     from pyarrow.fs import FSSpecHandler, PyFileSystem
@@ -148,7 +151,7 @@ def era5_monthly_sensor(
     state = normalize_stusps(os.environ.get("ERA5_STATE", "IL"))
 
     fs = icechunk.filesystem()  # generic s3fs transport (not Icechunk access)
-    existing = landed_months(fs, icechunk.bucket, state)
+    existing = landed_months(fs, icechunk.private_bucket, state)
     context.log.info("%s: %d landed parquet month(s) found.", state, len(existing))
 
     target = decide_target_month(existing, start, end)

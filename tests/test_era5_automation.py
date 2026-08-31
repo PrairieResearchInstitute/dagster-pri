@@ -69,7 +69,7 @@ def test_decide_target_ignores_out_of_bounds():
 # landed_months + sensor against a real local parquet dataset
 # --------------------------------------------------------------------------- #
 class LocalIcechunkStorageResource(IcechunkStorageResource):
-    """Points ``filesystem()`` at the local disk and ``bucket`` at a tmp dir."""
+    """Points ``filesystem()`` at the local disk and the buckets at tmp dirs."""
 
     def filesystem(self):
         import fsspec
@@ -85,8 +85,12 @@ def _write_parquet(bucket: Path, state: str, year: int, month: int) -> None:
 
 @pytest.fixture
 def resource(tmp_path):
+    # Two distinct roots: the sensor must read the private one (where
+    # daily_station_readings writes), so a regression to the public bucket
+    # leaves it seeing nothing landed.
     return LocalIcechunkStorageResource(
         bucket=str(tmp_path / "bucket"),
+        private_bucket=str(tmp_path / "private"),
         endpoint_url="http://test",
         access_key_id="x",
         secret_access_key="y",
@@ -94,16 +98,19 @@ def resource(tmp_path):
 
 
 def test_landed_months_reads_partitions(resource):
-    bucket = Path(resource.bucket)
+    bucket = Path(resource.private_bucket)
     _write_parquet(bucket, "IL", 2024, 1)
     _write_parquet(bucket, "IL", 2024, 2)
     _write_parquet(bucket, "IN", 2024, 5)  # different state, must not leak
 
-    assert landed_months(resource.filesystem(), resource.bucket, "IL") == {(2024, 1), (2024, 2)}
+    fs = resource.filesystem()
+    assert landed_months(fs, resource.private_bucket, "IL") == {(2024, 1), (2024, 2)}
+    # Nothing lands in the public bucket any more.
+    assert landed_months(fs, resource.bucket, "IL") == set()
 
 
 def test_landed_months_empty_when_no_prefix(resource):
-    assert landed_months(resource.filesystem(), resource.bucket, "IL") == set()
+    assert landed_months(resource.filesystem(), resource.private_bucket, "IL") == set()
 
 
 def _eval(resource, monkeypatch, **env):
@@ -123,7 +130,7 @@ def test_sensor_first_run_is_start(resource, monkeypatch):
 
 
 def test_sensor_advances_past_landed(resource, monkeypatch):
-    bucket = Path(resource.bucket)
+    bucket = Path(resource.private_bucket)
     _write_parquet(bucket, "IL", 2024, 1)
     _write_parquet(bucket, "IL", 2024, 2)
     result = _eval(resource, monkeypatch, ERA5_START_YM="2024-01", ERA5_STATE="IL")
@@ -132,7 +139,7 @@ def test_sensor_advances_past_landed(resource, monkeypatch):
 
 
 def test_sensor_skips_when_caught_up(resource, monkeypatch):
-    bucket = Path(resource.bucket)
+    bucket = Path(resource.private_bucket)
     _write_parquet(bucket, "IL", 2024, 1)
     _write_parquet(bucket, "IL", 2024, 2)
     result = _eval(

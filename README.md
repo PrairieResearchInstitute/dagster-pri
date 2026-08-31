@@ -197,14 +197,16 @@ summary below is orientation only.
 - **Command:** the default `CMD` is `["all"]` — webserver + daemon in one
   container. `webserver`, `daemon` and `grpc` split them; anything else runs
   verbatim. The split layout is supported, with caveats in `docs/deploy.md` §3.2.
-- **Needs:** a Postgres server and an S3-compatible bucket. Nothing else — no
-  application database, no Docker socket. External run launchers
-  (`dagster_docker` and friends) are **not supported** and are rejected at
-  startup.
+- **Needs:** a Postgres server and two S3-compatible buckets, one public and one
+  private. Nothing else — no application database, no Docker socket. External run
+  launchers (`dagster_docker` and friends) are **not supported** and are rejected
+  at startup.
 - **Required secrets:** `DAGSTER_PG_PASSWORD`, `AWS_ACCESS_KEY_ID`,
   `AWS_SECRET_ACCESS_KEY`, `CDSAPI_KEY`. Note `AWS_*`, not `S3_*`.
-- **Required non-secrets:** `BUCKET_NAME`, `AWS_ENDPOINT_URL`, `CDSAPI_URL`,
-  plus `ERA5_START_YM` for the sensor.
+- **Required non-secrets:** `BUCKET_NAME`, `PRIVATE_BUCKET_NAME`,
+  `AWS_ENDPOINT_URL`, `CDSAPI_URL`, plus `ERA5_START_YM` for the sensor. The two
+  buckets share one endpoint and one key pair; the private one holds the stations
+  CSV and the daily station parquet derived from it.
 - **Volumes:** `/opt/dagster/local` (persist — compute logs and artifacts) and
   `/opt/dagster/scratch` (`TMPDIR`, where ERA5 ingest stages whole months of
   NetCDF). Both must be owned by **uid 1000** if they are host bind mounts.
@@ -213,9 +215,9 @@ summary below is orientation only.
 - **Tag:** the release tag verbatim. Only `0.1.0-alpha.1` is published today —
   there is no `latest` tag yet, because that release is a pre-release.
 
-Before the first run the bucket must already hold the state's HUC8 clip mask and
-the stations CSV; then run the `era5_init` job for the state and start
-`era5_monthly_sensor` in the UI (it ships `STOPPED`).
+Before the first run `BUCKET_NAME` must already hold the state's HUC8 clip mask
+and `PRIVATE_BUCKET_NAME` the stations CSV; then run the `era5_init` job for the
+state and start `era5_monthly_sensor` in the UI (it ships `STOPPED`).
 
 ## Learn more
 
