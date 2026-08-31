@@ -23,6 +23,7 @@ class IcechunkStorageResource(dg.ConfigurableResource):
     """
 
     bucket: str = dg.EnvVar("BUCKET_NAME")
+    private_bucket: str = dg.EnvVar("PRIVATE_BUCKET_NAME")
     endpoint_url: str = dg.EnvVar("AWS_ENDPOINT_URL")
     access_key_id: str = dg.EnvVar("AWS_ACCESS_KEY_ID")
     secret_access_key: str = dg.EnvVar("AWS_SECRET_ACCESS_KEY")

@@ -60,7 +60,7 @@ def daily_station_readings(
         ) from e
 
     fs = icechunk.filesystem()
-    stations = load_stations(fs, icechunk.bucket, config.stations_key)
+    stations = load_stations(fs, icechunk.private_bucket, config.stations_key)
     context.log.info("Loaded %d stations from %s", len(stations), config.stations_key)
 
     session = repo.readonly_session("main")
