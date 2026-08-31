@@ -1,7 +1,10 @@
 """Monthly ERA5-Land backfill automation.
 
-A single job (``era5_monthly_job``) materializes ``era5_iceberg`` followed by
-``daily_station_readings`` for one (state, year, month). A sensor
+This module's job (``era5_monthly_job``) materializes ``era5_iceberg`` followed by
+``daily_station_readings`` for one (state, year, month) -- the full ingest-then-
+summarize chain for a new month. To rebuild only the daily station parquet for a
+month already in the store, use ``daily_station_readings_job``
+(:mod:`dagster_pri.defs.era5_stations`) instead; it skips the CDS download. A sensor
 (``era5_monthly_sensor``) walks a state forward one month at a time: each tick it
 queries the **landed parquet output** in the object store to find the latest month
 already produced, then requests a run for the next month -- bounded by a configured

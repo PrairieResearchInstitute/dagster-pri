@@ -14,6 +14,7 @@ import pandas as pd
 import xarray as xr
 
 from dagster_pri.era5.stations import (
+    HOURLY_VALUE_COLS,
     Station,
     extract_points,
     hourly_to_dataframe,
@@ -64,7 +65,7 @@ def _synthetic_store() -> xr.Dataset:
 def _run() -> pd.DataFrame:
     ds = _synthetic_store()
     ds = utc_month_slice(ds, 2024, 6)
-    pts = extract_points(ds, [STATION])
+    pts = extract_points(ds, [STATION], HOURLY_VALUE_COLS)
     return hourly_to_dataframe(pts, [STATION])
 
 

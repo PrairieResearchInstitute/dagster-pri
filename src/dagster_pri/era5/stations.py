@@ -9,8 +9,10 @@ values to **local Central-time calendar days**:
   * precip_total_mm                   -- daily total precipitation (mm)
 
 This mirrors the throwaway ``scripts/era5-stations.py`` (the reference impl) but
-buckets by Central day instead of UTC day, which changes how precipitation must
-be handled -- see :func:`daily_summary_local`.
+buckets by Central day instead of UTC day. Precipitation comes from the store's
+derived ``tp_hourly`` array -- per-hour increments the ingest already backed out of
+the UTC accumulation -- so summing it by local day needs no special handling here;
+see :func:`daily_summary_local`.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from __future__ import annotations
 import calendar
 from typing import TYPE_CHECKING, NamedTuple
 
-from dagster_pri.era5.accumulation import hourly_increment
+from dagster_pri.era5.accumulation import HOURLY_SUFFIX
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -31,6 +33,11 @@ V_T2M = "t2m"
 V_TP = "tp"
 V_D2M = "d2m"
 
+# The ingest's derived per-hour increment of `tp` (era5.accumulation), i.e. what the
+# raw accumulation-since-00Z would give if you differenced it. Written at ingest, so
+# the daily path reads it instead of re-differencing.
+V_TP_HOURLY = f"{V_TP}{HOURLY_SUFFIX}"
+
 # Default local day definition. ERA5-Land is UTC; Illinois stations are Central.
 DEFAULT_TZ = "America/Chicago"
 
@@ -40,6 +47,10 @@ VALUE_COLS = ["t2m_max_c", "t2m_min_c", "t2m_mean_c", "d2m_mean_c", "precip_tota
 # Hourly output value columns, in native ERA5 units as stored (t2m/d2m in Kelvin,
 # tp the raw accumulation-since-00Z in metres). Kept raw and unconverted.
 HOURLY_VALUE_COLS = [V_T2M, V_TP, V_D2M]
+
+# Store arrays the daily summary reads. Precipitation comes from the derived
+# increments, so the raw `tp` accumulation is deliberately not read.
+DAILY_SOURCE_VARS = [V_T2M, V_D2M, V_TP_HOURLY]
 
 
 class Station(NamedTuple):
@@ -71,10 +82,11 @@ def load_stations(fs, bucket: str, key: str) -> list[Station]:
 def padded_utc_slice(ds: xr.Dataset, year: int, month: int) -> xr.Dataset:
     """Slice ``ds`` to the requested month padded by +/- 1 UTC day.
 
-    Central-day boundaries fall at 05/06 UTC, so a one-day pad on each side fully
-    covers every Central day that overlaps the month and gives the precipitation
-    de-accumulation its neighbouring hours. The padding days are trimmed back out
-    in :func:`daily_summary_local`.
+    Local-day boundaries do not line up with UTC ones (Central days start at 05/06
+    UTC), so days at either end of the month reach into the neighbouring UTC day. A
+    one-day pad on each side covers every local day that overlaps the month for a tz
+    offset of either sign. The padding days are trimmed back out in
+    :func:`daily_summary_local`.
     """
     import pandas as pd
 
@@ -100,8 +112,12 @@ def utc_month_slice(ds: xr.Dataset, year: int, month: int) -> xr.Dataset:
     return ds.sel(time=slice(start, end))
 
 
-def extract_points(ds: xr.Dataset, stations: list[Station]) -> xr.Dataset:
-    """Nearest-cell extraction for ALL stations at once -> dims (time, station).
+def extract_points(ds: xr.Dataset, stations: list[Station], variables: list[str]) -> xr.Dataset:
+    """Nearest-cell extraction of ``variables`` for ALL stations at once.
+
+    Returns dims (time, station). ``variables`` is required rather than defaulted
+    because the two callers want different sets: :data:`DAILY_SOURCE_VARS` for the
+    daily summary and :data:`HOURLY_VALUE_COLS` for the raw hourly readings.
 
     Vectorized (pointwise) indexing reads each spatial chunk once and pulls every
     station out of it in memory, so the read cost is independent of the station
@@ -110,10 +126,19 @@ def extract_points(ds: xr.Dataset, stations: list[Station]) -> xr.Dataset:
     """
     import xarray as xr
 
+    missing = [v for v in variables if v not in ds.data_vars]
+    if missing:
+        raise ValueError(
+            f"the dataset is missing the requested variable(s) {missing}; it holds "
+            f"{sorted(ds.data_vars)}. A derived `{HOURLY_SUFFIX}` array exists only in "
+            f"stores whose `accumulated_variables` covered that variable at "
+            f"`era5_init` time -- re-run `era5_init` + `era5_iceberg` to add it."
+        )
+
     ids = [s.id for s in stations]
     sel_lat = xr.DataArray([s.lat for s in stations], dims="station", coords={"station": ids})
     sel_lon = xr.DataArray([s.lon for s in stations], dims="station", coords={"station": ids})
-    return ds[[V_T2M, V_TP, V_D2M]].sel(latitude=sel_lat, longitude=sel_lon, method="nearest")
+    return ds[list(variables)].sel(latitude=sel_lat, longitude=sel_lon, method="nearest")
 
 
 def daily_summary_local(pts: xr.Dataset, year: int, month: int, tz: str = DEFAULT_TZ) -> xr.Dataset:
@@ -130,12 +155,19 @@ def daily_summary_local(pts: xr.Dataset, year: int, month: int, tz: str = DEFAUL
 
     Precipitation
     -------------
-    ERA5-Land ``tp`` is an accumulation since 00 UTC that **resets at 00 UTC**, so
-    a naive resample/sum is wrong, and the UTC-only "value at 00:00 of D+1" trick
-    does not align to Central days. Instead we de-accumulate to per-hour increments
-    (:func:`dagster_pri.era5.accumulation.hourly_increment`) and sum those by local
-    day, which is day-definition agnostic. This is the same kernel the ingest uses
-    to derive the store's ``tp_hourly`` array.
+    Raw ERA5-Land ``tp`` accumulates since 00 UTC and **resets at 00 UTC**, so it
+    cannot be summed against a local day. We do not touch it: the ingest already
+    backed the accumulation out into per-hour increments and stored them as
+    ``tp_hourly`` (:func:`dagster_pri.era5.accumulation.add_hourly_increments`), and
+    those are day-definition agnostic, so this is a plain sum by local day.
+
+    One consequence: ``add_hourly_increments`` runs on one month's block at a time,
+    so the store's ``tp_hourly`` is NaN at 00:00 UTC on the 1st of each month -- that
+    step has no predecessor inside its own block. The last local day of the month
+    reaches into those hours, so its ``precip_total_mm`` comes out NaN. That is the
+    honest answer whenever the following month has not been ingested either; it now
+    also holds when it has. (Seeding the ingest's first increment from the store
+    would remove the NaN at the source.)
     """
     import numpy as np
     import pandas as pd
@@ -157,11 +189,12 @@ def daily_summary_local(pts: xr.Dataset, year: int, month: int, tz: str = DEFAUL
         }
     )
 
-    # Precipitation: de-accumulate to hourly increments, then sum by local day.
-    inc = hourly_increment(pts[V_TP])
+    # Precipitation: the store's increments are already per-hour, so just sum them.
     # skipna=False so a station whose nearest cell is all-NaN (outside the clip)
-    # yields NaN (dropped downstream) rather than a misleading 0.
-    out["precip_total_mm"] = inc.groupby("local_day").sum(skipna=False) * 1000.0
+    # yields NaN (dropped downstream) rather than a misleading 0. It is also what
+    # turns the month-start NaN into a NaN day rather than a short total -- see the
+    # docstring.
+    out["precip_total_mm"] = pts[V_TP_HOURLY].groupby("local_day").sum(skipna=False) * 1000.0
 
     # Drop the padding days: keep only local days in the requested month.
     days = pd.DatetimeIndex(out["local_day"].values)

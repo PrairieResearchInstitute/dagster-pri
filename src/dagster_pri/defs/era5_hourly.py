@@ -18,6 +18,7 @@ import dagster as dg
 from dagster_pri.defs.resources import IcechunkStorageResource
 from dagster_pri.era5.geometry import normalize_stusps, repo_prefix
 from dagster_pri.era5.stations import (
+    HOURLY_VALUE_COLS,
     extract_points,
     hourly_to_dataframe,
     load_stations,
@@ -76,7 +77,7 @@ def hourly_station_readings(
             )
         )
 
-    pts = extract_points(ds, stations)
+    pts = extract_points(ds, stations, HOURLY_VALUE_COLS)
 
     context.log.info("Reading with dask (%d threads)...", config.workers)
     pts = pts.compute(scheduler="threads", num_workers=config.workers)

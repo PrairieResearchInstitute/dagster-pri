@@ -141,6 +141,36 @@ initialized via the `era5_init` job. Configure it with these `.env` vars:
 | `ERA5_END_YM`   | no       | Last month, inclusive, `YYYY-MM`. Unbounded if unset.|
 | `ERA5_STATE`    | no       | USPS state code; defaults to `IL`.                   |
 
+### Recomputing daily station data (`daily_station_readings_job`)
+
+`daily_station_readings_job` runs the `daily_station_readings` asset on its own,
+against a month that is already in the state's Icechunk store. Use it to rebuild
+the daily station parquet — after a stations-CSV or aggregation change, say —
+without re-downloading the month from CDS. (`era5_monthly_job` is the full
+ingest → summaries chain for a *new* month.)
+
+Every field of `DailyStationReadingsConfig` is defaulted, so a run with no config
+builds `IL` 2024-01. Set the month you want in the Launchpad:
+
+```yaml
+ops:
+  daily_station_readings:
+    config:
+      state: IL
+      year: 2024
+      month: 3
+```
+
+or from the CLI:
+
+```bash
+uv run dg launch --job daily_station_readings_job \
+  --config-json '{"ops":{"daily_station_readings":{"config":{"state":"IL","year":2024,"month":3}}}}'
+```
+
+The month must already have been ingested; if it has not, the run fails with a
+message telling you to run `era5_init` + `era5_iceberg` first.
+
 ## Production deployment
 
 The repo builds a single, self-contained image that runs the Dagster webserver

@@ -7,6 +7,24 @@ Central-time days**, and writes a single parquet file to the object store at
 
 No CDS download: this is a read-only summary over already-ingested data. The store
 must already hold the requested month (run ``era5_init`` + ``era5_iceberg`` first).
+
+Two ways to run it. ``era5_monthly_job`` (see
+:mod:`dagster_pri.defs.era5_automation`) does ingest then summaries for a new
+month; ``daily_station_readings_job``, defined at the bottom of this module, runs
+just this asset against a month that is already in the store -- for recomputing
+daily station data without re-downloading the month. That job takes its
+parameters as run config, and every field of ``DailyStationReadingsConfig`` is
+defaulted, so a run with no config silently builds ``IL`` 2024-01: set the month
+you actually want.
+
+.. code-block:: yaml
+
+    ops:
+      daily_station_readings:
+        config:
+          state: IL
+          year: 2024
+          month: 3
 """
 
 import dagster as dg
@@ -14,6 +32,7 @@ import dagster as dg
 from dagster_pri.defs.resources import IcechunkStorageResource
 from dagster_pri.era5.geometry import normalize_stusps, repo_prefix
 from dagster_pri.era5.stations import (
+    DAILY_SOURCE_VARS,
     daily_summary_local,
     extract_points,
     load_stations,
@@ -74,7 +93,7 @@ def daily_station_readings(
             )
         )
 
-    pts = extract_points(ds, stations)
+    pts = extract_points(ds, stations, DAILY_SOURCE_VARS)
     daily = daily_summary_local(pts, config.year, config.month, tz=config.tz)
 
     context.log.info("Reading + aggregating with dask (%d threads)...", config.workers)
@@ -101,3 +120,12 @@ def daily_station_readings(
             "tz": config.tz,
         }
     )
+
+
+daily_station_readings_job = dg.define_asset_job(
+    "daily_station_readings_job",
+    selection=["daily_station_readings"],
+    description="Rebuild the daily station parquet for one state/month from the "
+    "already-ingested Icechunk store. Ingest is not re-run; the month must already "
+    "be present (use era5_monthly_job to ingest a new month).",
+)
