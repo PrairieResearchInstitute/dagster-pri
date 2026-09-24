@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+
 import pytest
 
 from dagster_pri.era5.cds import (
@@ -9,6 +11,7 @@ from dagster_pri.era5.cds import (
     download_month,
     download_month_batched,
     staged_nc_path,
+    staging_dir,
 )
 
 
@@ -88,3 +91,34 @@ def test_download_month_skips_a_nonempty_staged_file(tmp_path):
     download_month(client, 2024, 1, ["a"], [42.0, -91.0, 37.0, -87.0], out)
 
     assert client.requests == []
+
+
+@pytest.fixture
+def scratch(tmp_path, monkeypatch):
+    """Point ``tempfile`` (i.e. ``TMPDIR``) at a directory under tmp_path."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    return scratch
+
+
+def test_staging_dir_removes_its_temp_dir_on_success(scratch):
+    with staging_dir(None) as work:
+        assert work.parent == scratch
+        (work / "staged.nc").write_bytes(b"nc")
+    assert not work.exists()
+
+
+def test_staging_dir_keeps_its_temp_dir_on_failure(scratch):
+    with pytest.raises(RuntimeError), staging_dir(None) as work:
+        (work / "staged.nc").write_bytes(b"nc")
+        raise RuntimeError("boom")
+    assert (work / "staged.nc").exists()
+
+
+def test_staging_dir_never_removes_an_explicit_work_dir(tmp_path):
+    explicit = tmp_path / "work"
+    with staging_dir(str(explicit)) as work:
+        assert work == explicit
+        (work / "staged.nc").write_bytes(b"nc")
+    assert (explicit / "staged.nc").exists()

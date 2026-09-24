@@ -14,6 +14,10 @@ from __future__ import annotations
 
 import calendar
 import logging
+import shutil
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 log = logging.getLogger("era5land")
@@ -23,6 +27,27 @@ DATASET = "reanalysis-era5-land"
 # Variables per CDS request. At a full 31-day month this is 10 x 31 x 24 = 7,440
 # fields per request, comfortably under the reanalysis-era5-land cost limit.
 DEFAULT_VARIABLES_PER_REQUEST = 8
+
+
+@contextmanager
+def staging_dir(work_dir: str | None) -> Iterator[Path]:
+    """Yield the directory a run stages its CDS downloads in.
+
+    An explicit ``work_dir`` belongs to the caller and is never removed: it doubles
+    as a download cache, so a rerun skips the batches already staged there (see
+    :func:`download_month`). Otherwise a fresh ``era5land_*`` temp dir is created
+    under ``TMPDIR`` and removed once the block completes. If the block raises, the
+    temp dir is left in place for inspection.
+    """
+    if work_dir:
+        path = Path(work_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        yield path
+        return
+    path = Path(tempfile.mkdtemp(prefix="era5land_"))
+    # An exception in the block is re-raised at this yield, skipping the cleanup.
+    yield path
+    shutil.rmtree(path)
 
 
 def staged_nc_path(

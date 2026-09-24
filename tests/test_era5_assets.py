@@ -4,6 +4,7 @@ No real S3 or CDS: Icechunk uses local-filesystem storage under tmp_path, and a
 synthetic CDS client writes a fake NetCDF for the requested month.
 """
 
+import tempfile
 from pathlib import Path
 
 import dagster as dg
@@ -88,7 +89,7 @@ def resources(tmp_path, bucket_root):
     }
 
 
-def _init_config(work_dir: Path) -> Era5InitConfig:
+def _init_config(work_dir: Path | None) -> Era5InitConfig:
     return Era5InitConfig(
         state="IL",
         ref_year=1950,
@@ -98,18 +99,18 @@ def _init_config(work_dir: Path) -> Era5InitConfig:
         accumulated_variables=ACCUM,
         time_chunk=24,
         ndays=2,
-        work_dir=str(work_dir),
+        work_dir=str(work_dir) if work_dir else None,
     )
 
 
-def _ingest_config(year: int, month: int, work_dir: Path) -> Era5IngestConfig:
+def _ingest_config(year: int, month: int, work_dir: Path | None) -> Era5IngestConfig:
     """No variable lists: the ingest reads both off the store `era5_init` created."""
     return Era5IngestConfig(
         state="IL",
         year=year,
         month=month,
         ndays=2,
-        work_dir=str(work_dir),
+        work_dir=str(work_dir) if work_dir else None,
     )
 
 
@@ -141,6 +142,26 @@ def test_init_then_ingest_out_of_order(resources, tmp_path, local_clip_mask):
     ds = open_store_dataset(repo)
     assert np.all(ds["2m_temperature"].sel(time="1950-01-01T00:00").values == 1.0)
     assert np.all(ds["2m_temperature"].sel(time="1950-02-01T00:00").values == 2.0)
+
+
+def test_temp_staging_dirs_are_removed_after_success(
+    resources, tmp_path, local_clip_mask, monkeypatch
+):
+    """Without `work_dir`, neither init nor ingest leaves its downloads behind."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    assert era5_init.execute_in_process(
+        run_config=dg.RunConfig(ops={"init_state_store": _init_config(None)}), resources=resources
+    ).success
+    assert dg.materialize(
+        [era5_iceberg],
+        run_config=dg.RunConfig(ops={"era5_iceberg": _ingest_config(1950, 2, None)}),
+        resources=resources,
+    ).success
+
+    assert list(scratch.glob("era5land_*")) == []
 
 
 def test_accumulated_variable_gets_a_derived_hourly_array(resources, tmp_path, local_clip_mask):

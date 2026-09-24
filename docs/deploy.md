@@ -303,6 +303,12 @@ unless the op is given an explicit `work_dir` config value. `tempfile` honours
 `TMPDIR`, so **`TMPDIR` is the knob** — there is no separate scratch-directory
 variable, and `ODSC_SCRATCH_DIR`/`OSDC_SCRATCH_DIR` are read by nothing here.
 
+That temp dir is removed when the run succeeds and kept when it fails, so a
+failed run's downloads can be inspected (and must be cleared by hand). An
+explicit `work_dir` is never removed: it doubles as a download cache, so a rerun
+skips the batches already staged there. The volume therefore only has to hold
+the months being staged concurrently, plus whatever failed runs left behind.
+
 The image sets `TMPDIR=/opt/dagster/scratch` rather than leaving it at `/tmp`,
 so there is one obvious, non-shared mount point for the volume that has to
 absorb a month of NetCDF. Host `/tmp` is frequently small or a tmpfs.

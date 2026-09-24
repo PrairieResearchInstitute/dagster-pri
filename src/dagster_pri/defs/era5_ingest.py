@@ -18,14 +18,15 @@ batches are merged after clipping, because CDS rejects a whole-month request for
 the full variable set on cost (see :mod:`dagster_pri.era5.cds`).
 """
 
-import tempfile
-from pathlib import Path
-
 import dagster as dg
 
 from dagster_pri.defs.resources import CDSClientResource, IcechunkStorageResource
 from dagster_pri.era5.accumulation import add_hourly_increments
-from dagster_pri.era5.cds import DEFAULT_VARIABLES_PER_REQUEST, download_month_batched
+from dagster_pri.era5.cds import (
+    DEFAULT_VARIABLES_PER_REQUEST,
+    download_month_batched,
+    staging_dir,
+)
 from dagster_pri.era5.geometry import (
     bbox_from_geometry,
     get_state_geometry,
@@ -106,35 +107,34 @@ def era5_iceberg(
         ", ".join(store_vars.accumulated) or "none",
     )
 
-    work = Path(config.work_dir) if config.work_dir else Path(tempfile.mkdtemp(prefix="era5land_"))
-    work.mkdir(parents=True, exist_ok=True)
-    nc_paths = download_month_batched(
-        cds.get_client(),
-        config.year,
-        config.month,
-        variables,
-        area,
-        work,
-        state,
-        ndays=config.ndays,
-        variables_per_request=config.variables_per_request,
-    )
+    with staging_dir(config.work_dir) as work:
+        nc_paths = download_month_batched(
+            cds.get_client(),
+            config.year,
+            config.month,
+            variables,
+            area,
+            work,
+            state,
+            ndays=config.ndays,
+            variables_per_request=config.variables_per_request,
+        )
 
-    context.log.info(
-        "clipping %04d-%02d (%d file(s)) to %s...",
-        config.year,
-        config.month,
-        len(nc_paths),
-        state,
-    )
-    clipped = open_and_clip_batches(nc_paths, gdf)
-    clipped = add_hourly_increments(clipped, store_vars.accumulated)
-    validate_variables_against_store(repo, clipped)
+        context.log.info(
+            "clipping %04d-%02d (%d file(s)) to %s...",
+            config.year,
+            config.month,
+            len(nc_paths),
+            state,
+        )
+        clipped = open_and_clip_batches(nc_paths, gdf)
+        clipped = add_hourly_increments(clipped, store_vars.accumulated)
+        validate_variables_against_store(repo, clipped)
 
-    context.log.info("writing %04d-%02d into the store...", config.year, config.month)
-    mode = write_month(repo, clipped, config.year, config.month)
-    n_steps = int(clipped.sizes["time"])
-    clipped.close()
+        context.log.info("writing %04d-%02d into the store...", config.year, config.month)
+        mode = write_month(repo, clipped, config.year, config.month)
+        n_steps = int(clipped.sizes["time"])
+        clipped.close()
 
     return dg.MaterializeResult(
         metadata={

@@ -16,9 +16,6 @@ attributes and the accumulated set is implied by the ``_hourly`` arrays, so the
 ``era5_iceberg`` ingest reads them back rather than being configured to match.
 """
 
-import tempfile
-from pathlib import Path
-
 import dagster as dg
 
 from dagster_pri.defs.resources import CDSClientResource, IcechunkStorageResource
@@ -29,7 +26,11 @@ from dagster_pri.era5.axis import (
     default_axis_end,
     global_axis,
 )
-from dagster_pri.era5.cds import DEFAULT_VARIABLES_PER_REQUEST, download_month_batched
+from dagster_pri.era5.cds import (
+    DEFAULT_VARIABLES_PER_REQUEST,
+    download_month_batched,
+    staging_dir,
+)
 from dagster_pri.era5.geometry import (
     bbox_from_geometry,
     get_state_geometry,
@@ -82,45 +83,44 @@ def init_state_store(
     area = bbox_from_geometry(gdf, pad_deg=config.bbox_pad)
     context.log.info("%s bbox [N, W, S, E] = %s", state, area)
 
-    work = Path(config.work_dir) if config.work_dir else Path(tempfile.mkdtemp(prefix="era5land_"))
-    work.mkdir(parents=True, exist_ok=True)
-    nc_paths = download_month_batched(
-        cds.get_client(),
-        config.ref_year,
-        config.ref_month,
-        config.variables,
-        area,
-        work,
-        state,
-        ndays=config.ndays,
-        variables_per_request=config.variables_per_request,
-    )
-    context.log.info(
-        "clipping reference month %04d-%02d (%d file(s)) to %s...",
-        config.ref_year,
-        config.ref_month,
-        len(nc_paths),
-        state,
-    )
-    ref_clipped = open_and_clip_batches(nc_paths, gdf)
-    # The reference month fixes the store's variable set for good, so refuse to
-    # init from a payload that is missing variables.
-    check_variable_count(ref_clipped, config.variables)
-    context.log.info(
-        "de-accumulating %d variable(s): %s",
-        len(config.accumulated_variables),
-        ", ".join(config.accumulated_variables) or "(none)",
-    )
-    ref_clipped = add_hourly_increments(ref_clipped, config.accumulated_variables)
+    with staging_dir(config.work_dir) as work:
+        nc_paths = download_month_batched(
+            cds.get_client(),
+            config.ref_year,
+            config.ref_month,
+            config.variables,
+            area,
+            work,
+            state,
+            ndays=config.ndays,
+            variables_per_request=config.variables_per_request,
+        )
+        context.log.info(
+            "clipping reference month %04d-%02d (%d file(s)) to %s...",
+            config.ref_year,
+            config.ref_month,
+            len(nc_paths),
+            state,
+        )
+        ref_clipped = open_and_clip_batches(nc_paths, gdf)
+        # The reference month fixes the store's variable set for good, so refuse to
+        # init from a payload that is missing variables.
+        check_variable_count(ref_clipped, config.variables)
+        context.log.info(
+            "de-accumulating %d variable(s): %s",
+            len(config.accumulated_variables),
+            ", ".join(config.accumulated_variables) or "(none)",
+        )
+        ref_clipped = add_hourly_increments(ref_clipped, config.accumulated_variables)
 
-    repo = icechunk.open_or_create_repo(prefix)
-    init_store(repo, times, ref_clipped, config.time_chunk, config.variables)
+        repo = icechunk.open_or_create_repo(prefix)
+        init_store(repo, times, ref_clipped, config.time_chunk, config.variables)
 
-    context.log.info(
-        "region-writing reference month %04d-%02d...", config.ref_year, config.ref_month
-    )
-    write_month(repo, ref_clipped, config.ref_year, config.ref_month)
-    ref_clipped.close()
+        context.log.info(
+            "region-writing reference month %04d-%02d...", config.ref_year, config.ref_month
+        )
+        write_month(repo, ref_clipped, config.ref_year, config.ref_month)
+        ref_clipped.close()
     context.log.info(
         "Init complete for %s. Now materialize era5_iceberg in any month order.", state
     )
